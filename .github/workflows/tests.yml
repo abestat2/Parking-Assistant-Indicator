@@ -41,7 +41,12 @@ jobs:
           }
       - name: Check Docker
         # Fails if Docker Desktop is not running (it only runs while its user is signed in to Windows)
-        run: docker version --format "Docker server {{.Server.Version}}"
+        run: |
+          docker version --format "Docker server {{.Server.Version}}"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Cannot reach the Docker engine as $env:USERNAME. Check that Docker Desktop is running (it starts when its user signs in to Windows) and that this account is in the docker-users group. A service account only picks up a new group membership after a reboot."
+            exit 1
+          }
       - name: Build firmware
         # The checkout is mounted read-only and copied, so builds never write into the runner's work folder
         run: >
@@ -72,7 +77,12 @@ jobs:
           }
       - name: Check Docker
         # Fails if Docker Desktop is not running (it only runs while its user is signed in to Windows)
-        run: docker version --format "Docker server {{.Server.Version}}"
+        run: |
+          docker version --format "Docker server {{.Server.Version}}"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Cannot reach the Docker engine as $env:USERNAME. Check that Docker Desktop is running (it starts when its user signs in to Windows) and that this account is in the docker-users group. A service account only picks up a new group membership after a reboot."
+            exit 1
+          }
       - name: Run host tests
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
@@ -98,7 +108,12 @@ jobs:
           }
       - name: Check Docker
         # Fails if Docker Desktop is not running (it only runs while its user is signed in to Windows)
-        run: docker version --format "Docker server {{.Server.Version}}"
+        run: |
+          docker version --format "Docker server {{.Server.Version}}"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Cannot reach the Docker engine as $env:USERNAME. Check that Docker Desktop is running (it starts when its user signs in to Windows) and that this account is in the docker-users group. A service account only picks up a new group membership after a reboot."
+            exit 1
+          }
       - name: Run QEMU tests
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
