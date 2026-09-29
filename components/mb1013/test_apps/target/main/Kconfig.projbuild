@@ -1,0 +1,11 @@
+menu "MB1013 test app"
+
+    config MB1013_TEST_QEMU
+        bool "Run hardware-independent tests automatically (for QEMU)"
+        default n
+        help
+            QEMU does not emulate the RMT peripheral, so only the decoding tests can run there.
+            When enabled, the app runs the [decode] tests at boot, prints a summary line and
+            stops, instead of showing the interactive test menu.
+
+endmenu

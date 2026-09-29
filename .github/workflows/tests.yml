@@ -1,0 +1,105 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The desktop runner handles one job at a time; a newer push supersedes an older run of the same ref
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Official ESP-IDF image: toolchains, QEMU, Ruby (for CMock) and libbsd (for the linux target)
+  IDF_IMAGE: espressif/idf:v6.1
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: Build firmware and test app
+    # A pull request from a fork would run untrusted code on this PC, so only run PRs from this repo
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, X64, desktop]
+    timeout-minutes: 30
+    steps:
+      - name: Keep checked-out files byte-for-byte
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - name: Put Docker on PATH
+        # Docker Desktop installs to Program Files (all users) or to the user's AppData (per user)
+        run: |
+          if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+            $dir = @("$env:ProgramFiles\Docker\Docker\resources\bin", "$env:LOCALAPPDATA\Programs\DockerDesktop\resources\bin") |
+              Where-Object { Test-Path (Join-Path $_ "docker.exe") } | Select-Object -First 1
+            if (-not $dir) { throw "Docker CLI not found for $env:USERNAME. Docker Desktop must be installed for all users, or the runner service must run as the user who installed it." }
+            Add-Content $env:GITHUB_PATH $dir
+          }
+      - name: Check Docker
+        # Fails if Docker Desktop is not running (it only runs while its user is signed in to Windows)
+        run: docker version --format "Docker server {{.Server.Version}}"
+      - name: Build firmware
+        # The checkout is mounted read-only and copied, so builds never write into the runner's work folder
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && cd /work && idf.py -B /tmp/build build"
+      - name: Build on-target test app
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && cd /work/components/mb1013/test_apps/target && idf.py -B /tmp/build build"
+
+  host-tests:
+    name: Host tests (decoding + mocked driver)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, X64, desktop]
+    timeout-minutes: 30
+    steps:
+      - name: Keep checked-out files byte-for-byte
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - name: Put Docker on PATH
+        # Docker Desktop installs to Program Files (all users) or to the user's AppData (per user)
+        run: |
+          if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+            $dir = @("$env:ProgramFiles\Docker\Docker\resources\bin", "$env:LOCALAPPDATA\Programs\DockerDesktop\resources\bin") |
+              Where-Object { Test-Path (Join-Path $_ "docker.exe") } | Select-Object -First 1
+            if (-not $dir) { throw "Docker CLI not found for $env:USERNAME. Docker Desktop must be installed for all users, or the runner service must run as the user who installed it." }
+            Add-Content $env:GITHUB_PATH $dir
+          }
+      - name: Check Docker
+        # Fails if Docker Desktop is not running (it only runs while its user is signed in to Windows)
+        run: docker version --format "Docker server {{.Server.Version}}"
+      - name: Run host tests
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/components/mb1013/test_apps/host/run_host_tests.sh"
+
+  qemu-tests:
+    name: QEMU tests (decoding on ESP32-C3)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, X64, desktop]
+    timeout-minutes: 30
+    steps:
+      - name: Keep checked-out files byte-for-byte
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - name: Put Docker on PATH
+        # Docker Desktop installs to Program Files (all users) or to the user's AppData (per user)
+        run: |
+          if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+            $dir = @("$env:ProgramFiles\Docker\Docker\resources\bin", "$env:LOCALAPPDATA\Programs\DockerDesktop\resources\bin") |
+              Where-Object { Test-Path (Join-Path $_ "docker.exe") } | Select-Object -First 1
+            if (-not $dir) { throw "Docker CLI not found for $env:USERNAME. Docker Desktop must be installed for all users, or the runner service must run as the user who installed it." }
+            Add-Content $env:GITHUB_PATH $dir
+          }
+      - name: Check Docker
+        # Fails if Docker Desktop is not running (it only runs while its user is signed in to Windows)
+        run: docker version --format "Docker server {{.Server.Version}}"
+      - name: Run QEMU tests
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/components/mb1013/test_apps/target/run_qemu_tests.sh"

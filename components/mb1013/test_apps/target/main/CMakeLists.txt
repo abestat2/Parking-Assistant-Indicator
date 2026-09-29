@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "test_app_main.cpp"
+        "test_loopback.cpp"
+        "../../common/test_decode.cpp"
+    PRIV_REQUIRES
+        unity
+        mb1013
+        esp_driver_rmt
+        esp_timer
+        esp_rom
+    WHOLE_ARCHIVE
+)

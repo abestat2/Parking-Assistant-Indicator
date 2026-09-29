@@ -1,0 +1,3 @@
+CONFIG_IDF_TARGET="linux"
+# Logging would call into the mocked FreeRTOS, so compile it out
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y

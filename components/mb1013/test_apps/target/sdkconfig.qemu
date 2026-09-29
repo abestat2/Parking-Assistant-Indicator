@@ -1,0 +1,2 @@
+# Layered on sdkconfig.defaults by run_qemu_tests.ps1
+CONFIG_MB1013_TEST_QEMU=y
