@@ -1,4 +1,7 @@
+# VSCode Config
 .vscode
+
+# ESP-IDF build output
 build
 
 # Test app build output and generated config
@@ -8,3 +11,6 @@ components/mb1013/test_apps/*/sdkconfig.old
 
 # graphify knowledge-graph output (local analysis, contains machine-specific paths)
 graphify-out
+
+# Claude
+CLAUDE.md
