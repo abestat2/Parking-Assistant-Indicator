@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "test_main.cpp"
+        "test_driver_mocked.cpp"
+        "../../common/test_decode.cpp"
+    PRIV_REQUIRES
+        unity
+        cmock
+        mb1013
+        driver
+        freertos
+    WHOLE_ARCHIVE
+)
