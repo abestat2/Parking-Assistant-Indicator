@@ -12,5 +12,6 @@ components/mb1013/test_apps/*/sdkconfig.old
 # graphify knowledge-graph output (local analysis, contains machine-specific paths)
 graphify-out
 
-# Claude
+# Claude Config
 CLAUDE.md
+.claude
