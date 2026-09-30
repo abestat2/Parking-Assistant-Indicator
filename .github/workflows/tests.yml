@@ -133,3 +133,17 @@ jobs:
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && bash /work/components/detection_link/test_apps/target/run_qemu_tests.sh"
+
+  hardware-tests:
+    name: Hardware tests (ESP32-C3 on the runner)
+    # Needs the ESP32-C3 board plugged into the runner PC and the ESP-IDF v6.1 install from the
+    # Espressif Installation Manager. Runs on Windows directly, since Docker cannot reach the COM port.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, X64, desktop]
+    timeout-minutes: 30
+    steps:
+      - name: Keep checked-out files byte-for-byte
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - name: Build, flash and run detection link tests on the board
+        run: ./components/detection_link/test_apps/target/run_hw_tests.ps1

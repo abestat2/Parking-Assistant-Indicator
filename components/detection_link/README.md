@@ -68,7 +68,11 @@ Detector (runs forever): call `set_local_item_state()` whenever the sensor readi
   on the ESP32-C3 (and in QEMU).
 - `test_apps/host/` — `run_host_tests.sh`: the common tests, plus `EspNowTransport` against the
   CMock ESP-NOW mock.
-- `test_apps/target/` — `run_qemu_tests.sh` / `.ps1` run everything except `[hw]` in QEMU. Flash
-  the app to a board and use the Unity menu for the `[hw]` radio tests (one board, no peer needed).
+- `test_apps/target/` — `run_qemu_tests.sh` / `.ps1` run everything except `[hw]` in QEMU.
+  `run_hw_tests.ps1` builds, flashes and runs every test, including the `[hw]` radio tests, on an
+  ESP32-C3 plugged into the PC (one board, no peer needed). It finds the board by USB vendor ID
+  and picks the console to match. Boards using the chip's built-in USB port need the
+  USB-Serial/JTAG console (`sdkconfig.usb_serial_jtag`), or the Unity menu never sees its input.
+  CI runs it in the `hardware-tests` job on the runner PC.
 
 The two-board validation plan in the design document still needs real hardware.
