@@ -21,7 +21,7 @@ defaults:
 
 jobs:
   build:
-    name: Build firmware and test app
+    name: Build firmware and test apps
     # A pull request from a fork would run untrusted code on this PC, so only run PRs from this repo
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Windows, X64, desktop]
@@ -52,13 +52,17 @@ jobs:
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && cd /work && idf.py -B /tmp/build build"
-      - name: Build on-target test app
+      - name: Build MB1013 on-target test app
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && cd /work/components/mb1013/test_apps/target && idf.py -B /tmp/build build"
+      - name: Build detection link on-target test app
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && cd /work/components/detection_link/test_apps/target && idf.py -B /tmp/build build"
 
   host-tests:
-    name: Host tests (decoding + mocked driver)
+    name: Host tests (MB1013 + detection link)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Windows, X64, desktop]
     timeout-minutes: 30
@@ -83,13 +87,19 @@ jobs:
             Write-Host "::error::Cannot reach the Docker engine as $env:USERNAME. Check that Docker Desktop is running (it starts when its user signs in to Windows) and that this account is in the docker-users group. A service account only picks up a new group membership after a reboot."
             exit 1
           }
-      - name: Run host tests
+      - name: Run MB1013 host tests
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && bash /work/components/mb1013/test_apps/host/run_host_tests.sh"
+      - name: Run detection link host tests
+        # Always run, so a failure in the MB1013 tests does not hide these results
+        if: ${{ !cancelled() }}
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/components/detection_link/test_apps/host/run_host_tests.sh"
 
   qemu-tests:
-    name: QEMU tests (decoding on ESP32-C3)
+    name: QEMU tests (ESP32-C3)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Windows, X64, desktop]
     timeout-minutes: 30
@@ -114,7 +124,26 @@ jobs:
             Write-Host "::error::Cannot reach the Docker engine as $env:USERNAME. Check that Docker Desktop is running (it starts when its user signs in to Windows) and that this account is in the docker-users group. A service account only picks up a new group membership after a reboot."
             exit 1
           }
-      - name: Run QEMU tests
+      - name: Run MB1013 QEMU tests
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && bash /work/components/mb1013/test_apps/target/run_qemu_tests.sh"
+      - name: Run detection link QEMU tests
+        if: ${{ !cancelled() }}
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/components/detection_link/test_apps/target/run_qemu_tests.sh"
+
+  hardware-tests:
+    name: Hardware tests (ESP32-C3 on the runner)
+    # Needs the ESP32-C3 board plugged into the runner PC and the ESP-IDF v6.1 install from the
+    # Espressif Installation Manager. Runs on Windows directly, since Docker cannot reach the COM port.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, X64, desktop]
+    timeout-minutes: 30
+    steps:
+      - name: Keep checked-out files byte-for-byte
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - name: Build, flash and run detection link tests on the board
+        run: ./components/detection_link/test_apps/target/run_hw_tests.ps1

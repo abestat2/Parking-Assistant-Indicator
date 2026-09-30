@@ -1,0 +1,11 @@
+menu "Detection link test app"
+
+    config DETECTION_LINK_TEST_QEMU
+        bool "Run hardware-independent tests automatically (for QEMU)"
+        default n
+        help
+            QEMU does not emulate the ESP32-C3 Wi-Fi radio, so the [hw] tests cannot run there.
+            When enabled, the app runs every other test at boot, prints a summary line and
+            stops, instead of showing the interactive test menu.
+
+endmenu

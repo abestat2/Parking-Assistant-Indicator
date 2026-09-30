@@ -1,0 +1,4 @@
+# Layered on sdkconfig.defaults by run_hw_tests.ps1 for boards wired through the ESP32-C3's
+# built-in USB port. By default that port is only a secondary, output-only console, so the Unity
+# menu would never see the test selection sent to it.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
