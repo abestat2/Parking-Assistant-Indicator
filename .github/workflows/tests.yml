@@ -87,16 +87,72 @@ jobs:
             Write-Host "::error::Cannot reach the Docker engine as $env:USERNAME. Check that Docker Desktop is running (it starts when its user signs in to Windows) and that this account is in the docker-users group. A service account only picks up a new group membership after a reboot."
             exit 1
           }
+      - name: Empty the coverage folder
+        # Each test container writes its coverage here; the folder outlives the job on this runner
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "coverage"
+          if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+          New-Item -ItemType Directory $dir | Out-Null
       - name: Run MB1013 host tests
         run: >
-          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
-          bash -c "cp -a /project /work && bash /work/components/mb1013/test_apps/host/run_host_tests.sh"
+          docker run --rm -v "${{ github.workspace }}:/project:ro" -v "${{ runner.temp }}/coverage:/out" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh mb1013 /out"
       - name: Run detection link host tests
         # Always run, so a failure in the MB1013 tests does not hide these results
         if: ${{ !cancelled() }}
         run: >
-          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
-          bash -c "cp -a /project /work && bash /work/components/detection_link/test_apps/host/run_host_tests.sh"
+          docker run --rm -v "${{ github.workspace }}:/project:ro" -v "${{ runner.temp }}/coverage:/out" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh detection_link /out"
+      - name: Coverage report
+        if: ${{ !cancelled() }}
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/project:ro" -v "${{ runner.temp }}/coverage:/out" $env:IDF_IMAGE `
+            bash -c "cp -a /project /work && bash /work/.github/scripts/coverage_report.sh /out"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "## Host test coverage`n``````text" | Add-Content $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP\coverage\coverage.txt" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "``````" | Add-Content $env:GITHUB_STEP_SUMMARY
+      - name: Upload coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            ${{ runner.temp }}/coverage/html
+            ${{ runner.temp }}/coverage/coverage.txt
+            ${{ runner.temp }}/coverage/coverage.svg
+          if-no-files-found: ignore
+
+  coverage-badge:
+    name: Publish coverage badge
+    # Only coverage from main goes on the badge, and only after every host test passed
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: host-tests
+    runs-on: [self-hosted, Windows, X64, desktop]
+    timeout-minutes: 10
+    permissions:
+      # Pushes the badge to the "badges" branch, which the README's coverage badge points at
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: ${{ runner.temp }}/coverage-report
+      - name: Push the badge to the badges branch
+        # The branch holds one commit with just coverage.svg, replaced on every run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $dir = Join-Path $env:RUNNER_TEMP "badges"
+          if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\coverage-report\coverage.svg" $dir
+          git -C $dir init -q -b badges
+          git -C $dir add coverage.svg
+          git -C $dir -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" `
+            commit -q -m "Coverage badge for $env:GITHUB_SHA"
+          git -C $dir push -q --force "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git" HEAD:badges
 
   qemu-tests:
     name: QEMU tests (ESP32-C3)
