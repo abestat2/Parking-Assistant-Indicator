@@ -24,3 +24,9 @@ idf_component_register(
     REQUIRES
         ${requires}
 )
+
+if(${target} STREQUAL "linux")
+    # Host tests measure line coverage of this component (gcov); CI turns it into the coverage badge
+    target_compile_options(${COMPONENT_LIB} PRIVATE --coverage)
+    target_link_options(${COMPONENT_LIB} INTERFACE --coverage)
+endif()
