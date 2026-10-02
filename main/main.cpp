@@ -12,6 +12,27 @@
 #define I2C_SCL_PIN GPIO_NUM_6
 #define RANGE_DETECTOR_XSHUT_PIN GPIO_NUM_4
 
+// How often to try again when the sensor is missing or not responding
+static constexpr TickType_t SENSOR_RETRY_DELAY = pdMS_TO_TICKS(5000);
+// Consecutive I2C errors while ranging before the sensor is treated as disconnected
+static constexpr int MAX_READ_ERRORS = 3;
+
+// Initialize the sensor and start ranging. On failure the driver is released so this can be retried.
+static bool start_range_sensor(VL53L1X& sensor, const vl53l1x::Config& config)
+{
+    esp_err_t ret = sensor.init(config);
+    if (ret == ESP_OK) {
+        ret = sensor.start_ranging();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW("RANGE", "Range sensor not available (%s), retrying", esp_err_to_name(ret));
+        sensor.deinit();
+        return false;
+    }
+    ESP_LOGI("RANGE", "Range sensor ranging");
+    return true;
+}
+
 
 extern "C" void app_main(void)
 {
@@ -30,8 +51,6 @@ extern "C" void app_main(void)
     // Reduce toward 4x4 to narrow the field of view
     config.roi_width = 16;
     config.roi_height = 16;
-    ESP_ERROR_CHECK(range_sensor.init(config));
-    ESP_ERROR_CHECK(range_sensor.start_ranging());
 
     uint8_t baseMac[6];
     if(esp_read_mac(baseMac, ESP_MAC_WIFI_STA) == ESP_OK) {
@@ -43,10 +62,26 @@ extern "C" void app_main(void)
         ESP_LOGE("MAC", "Failed to read MAC address");
     }
 
+    // A missing or failed sensor is retried rather than treated as fatal
+    int read_errors = 0;
     while (true) {
+        if (!range_sensor.is_ranging()) {
+            if (!start_range_sensor(range_sensor, config)) {
+                vTaskDelay(SENSOR_RETRY_DELAY);
+                continue;
+            }
+            read_errors = 0;
+        }
+
         int32_t range = range_sensor.read_range_mm(200);
         if (range >= 0) {
+            read_errors = 0;
             ESP_LOGI("RANGE", "Range: %" PRId32 " mm", range);
+        } else if (range == vl53l1x::RANGE_ERROR) {
+            if (++read_errors >= MAX_READ_ERRORS) {
+                ESP_LOGW("RANGE", "Range sensor stopped responding");
+                range_sensor.deinit();
+            }
         } else {
             ESP_LOGW("RANGE", "No range (%" PRId32 "), status %u", range, range_sensor.last_range_status());
         }
