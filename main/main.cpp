@@ -118,6 +118,57 @@ static void describe_sonar(char* text, size_t size, int32_t range)
     }
 }
 
+// Qwiic connector on the SparkFun Pro Micro ESP32-C3
+#define I2C_SDA_PIN GPIO_NUM_5
+#define I2C_SCL_PIN GPIO_NUM_6
+#define RANGE_DETECTOR_XSHUT_PIN GPIO_NUM_4
+// MB1013 PW output
+#define SONAR_PW_PIN GPIO_NUM_7
+
+// How often to try again when the range sensor is missing or not responding
+static constexpr TickType_t SENSOR_RETRY_DELAY = pdMS_TO_TICKS(5000);
+// Consecutive I2C errors while ranging before the sensor is treated as disconnected
+static constexpr int MAX_READ_ERRORS = 3;
+
+// Initialize the sensor and start ranging. On failure the driver is released so this can be retried.
+static bool start_range_sensor(VL53L1X& sensor, const vl53l1x::Config& config)
+{
+    esp_err_t ret = sensor.init(config);
+    if (ret == ESP_OK) {
+        ret = sensor.start_ranging();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW("RANGE", "Range sensor not available (%s), retrying", esp_err_to_name(ret));
+        sensor.deinit();
+        return false;
+        }
+    ESP_LOGI("RANGE", "Range sensor ranging");
+    return true;
+}
+
+// Format a VL53L1X result: a distance, or why there is none
+static void describe_lidar(char* text, size_t size, int32_t range)
+{
+    switch (range) {
+    case vl53l1x::RANGE_TIMEOUT: snprintf(text, size, "timeout"); break;
+    case vl53l1x::RANGE_OUT_OF_RANGE: snprintf(text, size, "out of range"); break;
+    case vl53l1x::RANGE_INVALID: snprintf(text, size, "invalid"); break;
+    case vl53l1x::RANGE_ERROR: snprintf(text, size, "not available"); break;
+    default: snprintf(text, size, "%" PRId32 " mm", range); break;
+    }
+}
+
+// Format an MB1013 result: a distance, or why there is none
+static void describe_sonar(char* text, size_t size, int32_t range)
+{
+    switch (range) {
+    case mb1013::RANGE_UNRESOLVED: snprintf(text, size, "no pulse"); break;
+    case mb1013::RANGE_IN_PROGRESS: snprintf(text, size, "in progress"); break;
+    case mb1013::RANGE_ERROR: snprintf(text, size, "error"); break;
+    default: snprintf(text, size, "%" PRId32 " mm", range); break;
+    }
+}
+
 
 extern "C" void app_main(void)
 {

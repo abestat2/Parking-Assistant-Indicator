@@ -1,5 +1,6 @@
 #include "VL53L1X.hpp"
 #include "vl53l1x_platform.hpp"
+#include "vl53l1x_uld.h"
 #include "driver/gpio.h"
 #include "soc/soc_caps.h"
 #include "freertos/FreeRTOS.h"

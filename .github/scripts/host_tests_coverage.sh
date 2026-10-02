@@ -25,9 +25,11 @@ fi
 python -m pip install --quiet --disable-pip-version-check "gcovr==8.*" || exit 2
 
 # Only the component's own sources are built with --coverage; the filter also drops its test code
+# and vendored third-party code (vl53l1x/st_uld is ST's driver, of which only part is used)
 gcovr --root "$REPO_DIR" \
     --filter "$REPO_DIR/components/$COMPONENT/" \
     --exclude "$REPO_DIR/components/$COMPONENT/test_apps/" \
+    --exclude "$REPO_DIR/components/$COMPONENT/st_uld/" \
     --json "$OUT_DIR/$COMPONENT.json" \
     "$BUILD_DIR" || exit 2
 

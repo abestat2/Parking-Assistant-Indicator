@@ -1,3 +1,5 @@
 CONFIG_IDF_TARGET="linux"
 # Logging would call into the mocked FreeRTOS, so compile it out
 CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+# Match the application tick rate, so 1 ms delays round to zero ticks as they do on the device
+CONFIG_FREERTOS_HZ=100

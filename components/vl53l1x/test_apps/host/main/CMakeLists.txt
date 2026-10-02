@@ -3,6 +3,12 @@ idf_component_register(
         "test_main.cpp"
         "test_driver_simulated.cpp"
         "../../common/test_config.cpp"
+        "test_platform.cpp"
+        "../../common/test_config.cpp"
+    # test_platform.cpp tests the component's private ULD platform layer directly
+    PRIV_INCLUDE_DIRS
+        "../../.."
+        "../../../st_uld/platform"
     PRIV_REQUIRES
         unity
         cmock

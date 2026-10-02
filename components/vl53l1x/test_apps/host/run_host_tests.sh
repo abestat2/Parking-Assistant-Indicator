@@ -14,9 +14,12 @@
 #   IDF_PYTHON_ENV_PATH  ESP-IDF Python venv
 #   BUILD_DIR            Build directory (default: /tmp/vl53l1x_host_build; kept off /mnt/c for speed)
 #   CLEAN=1              Delete the build directory first
+#   COVERAGE=1           Print a per-file gcov coverage summary after the tests. Host builds of
+#                        the component are always instrumented; CI's report uses gcovr instead.
 
 set -u
 
+COVERAGE="${COVERAGE:-0}"
 BUILD_DIR="${BUILD_DIR:-/tmp/vl53l1x_host_build}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -68,5 +71,26 @@ if ! idf -B "$BUILD_DIR" build > "$BUILD_DIR.build.log" 2>&1; then
     exit 2
 fi
 
+# Drop coverage counts from earlier runs, so a report covers this run only
+find "$BUILD_DIR" -name "*.gcda" -delete
+
 echo "Running tests"
 "$BUILD_DIR/vl53l1x_host_test.elf"
+result=$?
+
+if [ "$COVERAGE" = "1" ]; then
+    # gcov writes annotated sources (*.gcov, "#####" marks unrun lines) into the object directory
+    OBJ_DIR="$BUILD_DIR/esp-idf/vl53l1x/CMakeFiles/__idf_vl53l1x.dir"
+    echo
+    echo "Coverage of the vl53l1x component (ST's VL53L1X_api.c is built through vl53l1x_uld.c):"
+    (cd "$OBJ_DIR" && for gcda in *.gcda; do gcov -b -c -o . "$gcda"; done) 2> /dev/null |
+        awk '/^File / { file = $2; gsub(/\x27/, "", file); sub(/.*\/vl53l1x\//, "", file) }
+             /^Lines executed:/ { lines = $0; sub(/^Lines executed:/, "", lines) }
+             /^Taken at least once:/ { branches = $0; sub(/^Taken at least once:/, "", branches) }
+             /^No branches/ { branches = "none" }
+             /^Creating / && file != "" && file !~ /^\// {
+                 printf "  %-28s lines %-14s branches %s\n", file, lines, branches; file = ""; branches = "" }'
+    echo "Annotated sources: $OBJ_DIR/*.gcov"
+fi
+
+exit $result
