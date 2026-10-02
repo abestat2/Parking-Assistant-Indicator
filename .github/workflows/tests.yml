@@ -21,7 +21,7 @@ defaults:
 
 jobs:
   build:
-    name: Build firmware and test app
+    name: Build firmware and test apps
     # A pull request from a fork would run untrusted code on this PC, so only run PRs from this repo
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Windows, X64, desktop]
@@ -60,9 +60,13 @@ jobs:
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && cd /work/components/vl53l1x/test_apps/target && idf.py -B /tmp/build build"
+      - name: Build detection link on-target test app
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && cd /work/components/detection_link/test_apps/target && idf.py -B /tmp/build build"
 
   host-tests:
-    name: Host tests (decoding + mocked driver)
+    name: Host tests (MB1013 + detection link)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Windows, X64, desktop]
     timeout-minutes: 30
@@ -95,9 +99,75 @@ jobs:
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && COVERAGE=1 bash /work/components/vl53l1x/test_apps/host/run_host_tests.sh"
+      - name: Empty the coverage folder
+        # Each test container writes its coverage here; the folder outlives the job on this runner
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "coverage"
+          if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+          New-Item -ItemType Directory $dir | Out-Null
+      - name: Run MB1013 host tests
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" -v "${{ runner.temp }}/coverage:/out" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh mb1013 /out"
+      - name: Run detection link host tests
+        # Always run, so a failure in the MB1013 tests does not hide these results
+        if: ${{ !cancelled() }}
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" -v "${{ runner.temp }}/coverage:/out" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh detection_link /out"
+      - name: Coverage report
+        if: ${{ !cancelled() }}
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/project:ro" -v "${{ runner.temp }}/coverage:/out" $env:IDF_IMAGE `
+            bash -c "cp -a /project /work && bash /work/.github/scripts/coverage_report.sh /out"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "## Host test coverage`n``````text" | Add-Content $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP\coverage\coverage.txt" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "``````" | Add-Content $env:GITHUB_STEP_SUMMARY
+      - name: Upload coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            ${{ runner.temp }}/coverage/html
+            ${{ runner.temp }}/coverage/coverage.txt
+            ${{ runner.temp }}/coverage/coverage.svg
+          if-no-files-found: ignore
+
+  coverage-badge:
+    name: Publish coverage badge
+    # Only coverage from main goes on the badge, and only after every host test passed
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: host-tests
+    runs-on: [self-hosted, Windows, X64, desktop]
+    timeout-minutes: 10
+    permissions:
+      # Pushes the badge to the "badges" branch, which the README's coverage badge points at
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: ${{ runner.temp }}/coverage-report
+      - name: Push the badge to the badges branch
+        # The branch holds one commit with just coverage.svg, replaced on every run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $dir = Join-Path $env:RUNNER_TEMP "badges"
+          if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\coverage-report\coverage.svg" $dir
+          git -C $dir init -q -b badges
+          git -C $dir add coverage.svg
+          git -C $dir -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" `
+            commit -q -m "Coverage badge for $env:GITHUB_SHA"
+          git -C $dir push -q --force "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git" HEAD:badges
 
   qemu-tests:
-    name: QEMU tests (decoding on ESP32-C3)
+    name: QEMU tests (ESP32-C3)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Windows, X64, desktop]
     timeout-minutes: 30
@@ -130,3 +200,22 @@ jobs:
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && bash /work/components/vl53l1x/test_apps/target/run_qemu_tests.sh"
+      - name: Run detection link QEMU tests
+        if: ${{ !cancelled() }}
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/components/detection_link/test_apps/target/run_qemu_tests.sh"
+
+  hardware-tests:
+    name: Hardware tests (ESP32-C3 on the runner)
+    # Needs the ESP32-C3 board plugged into the runner PC and the ESP-IDF v6.1 install from the
+    # Espressif Installation Manager. Runs on Windows directly, since Docker cannot reach the COM port.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, X64, desktop]
+    timeout-minutes: 30
+    steps:
+      - name: Keep checked-out files byte-for-byte
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - name: Build, flash and run detection link tests on the board
+        run: ./components/detection_link/test_apps/target/run_hw_tests.ps1
