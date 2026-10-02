@@ -14,18 +14,13 @@
 #   IDF_PYTHON_ENV_PATH  ESP-IDF Python venv
 #   BUILD_DIR            Build directory (default: /tmp/vl53l1x_host_build; kept off /mnt/c for speed)
 #   CLEAN=1              Delete the build directory first
-#   COVERAGE=1           Instrument the vl53l1x component and print an lcov coverage summary
-#                        (needs lcov; builds in a separate directory)
+#   COVERAGE=1           Print a per-file gcov coverage summary after the tests. Host builds of
+#                        the component are always instrumented; CI's report uses gcovr instead.
 
 set -u
 
 COVERAGE="${COVERAGE:-0}"
-if [ "$COVERAGE" = "1" ]; then
-    BUILD_DIR="${BUILD_DIR:-/tmp/vl53l1x_host_build_coverage}"
-else
-    BUILD_DIR="${BUILD_DIR:-/tmp/vl53l1x_host_build}"
-fi
-export COVERAGE
+BUILD_DIR="${BUILD_DIR:-/tmp/vl53l1x_host_build}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ -n "${IDF_PATH:-}" ] && command -v idf.py > /dev/null; then
@@ -76,10 +71,8 @@ if ! idf -B "$BUILD_DIR" build > "$BUILD_DIR.build.log" 2>&1; then
     exit 2
 fi
 
-if [ "$COVERAGE" = "1" ]; then
-    # Drop counts from earlier runs so the report covers this run only
-    find "$BUILD_DIR" -name "*.gcda" -delete
-fi
+# Drop coverage counts from earlier runs, so a report covers this run only
+find "$BUILD_DIR" -name "*.gcda" -delete
 
 echo "Running tests"
 "$BUILD_DIR/vl53l1x_host_test.elf"
