@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "test_app_main.cpp"
+        "test_hardware.cpp"
+        "../../common/test_config.cpp"
+    PRIV_REQUIRES
+        unity
+        vl53l1x
+        i2c_bus
+        esp_timer
+    WHOLE_ARCHIVE
+)

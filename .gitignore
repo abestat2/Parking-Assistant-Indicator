@@ -8,6 +8,8 @@ build
 build_qemu
 components/mb1013/test_apps/*/sdkconfig
 components/mb1013/test_apps/*/sdkconfig.old
+components/vl53l1x/test_apps/*/sdkconfig
+components/vl53l1x/test_apps/*/sdkconfig.old
 
 # graphify knowledge-graph output (local analysis, contains machine-specific paths)
 graphify-out

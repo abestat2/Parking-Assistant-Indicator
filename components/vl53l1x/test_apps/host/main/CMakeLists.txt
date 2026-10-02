@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "test_main.cpp"
+        "test_driver_simulated.cpp"
+        "../../common/test_config.cpp"
+    PRIV_REQUIRES
+        unity
+        cmock
+        vl53l1x
+        i2c_bus
+        driver
+        freertos
+    WHOLE_ARCHIVE
+)

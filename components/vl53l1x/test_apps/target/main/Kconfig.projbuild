@@ -1,0 +1,27 @@
+menu "VL53L1X test app"
+
+    config VL53L1X_TEST_QEMU
+        bool "Run hardware-independent tests automatically (for QEMU)"
+        default n
+        help
+            QEMU has no VL53L1X on its I2C bus, so only the configuration tests can run there.
+            When enabled, the app runs the [config] tests at boot, prints a summary line and
+            stops, instead of showing the interactive test menu.
+
+    config VL53L1X_TEST_SDA_GPIO
+        int "I2C SDA GPIO"
+        default 5
+        help
+            Default is the Qwiic connector on the SparkFun Pro Micro ESP32-C3.
+
+    config VL53L1X_TEST_SCL_GPIO
+        int "I2C SCL GPIO"
+        default 6
+        help
+            Default is the Qwiic connector on the SparkFun Pro Micro ESP32-C3.
+
+    config VL53L1X_TEST_XSHUT_GPIO
+        int "XSHUT GPIO"
+        default 4
+
+endmenu
