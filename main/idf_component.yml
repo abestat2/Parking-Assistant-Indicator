@@ -1,0 +1,3 @@
+dependencies:
+  # Addressable LED driver (SK6812 RGBW NeoPixel Stick) from the Espressif component registry
+  espressif/led_strip: "^3.0.3"

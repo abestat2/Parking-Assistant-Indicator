@@ -1,8 +1,9 @@
 # VSCode Config
 .vscode
 
-# ESP-IDF build output
+# ESP-IDF build output and downloaded registry components (pinned by dependencies.lock)
 build
+managed_components
 
 # Test app build output and generated config
 build_qemu

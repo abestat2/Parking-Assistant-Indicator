@@ -8,6 +8,7 @@
 #include "I2cBus.hpp"
 #include "VL53L1X.hpp"
 #include "MB1013.hpp"
+#include "led_strip.h"
 
 // Qwiic connector on the SparkFun Pro Micro ESP32-C3
 #define I2C_SDA_PIN GPIO_NUM_5
@@ -15,6 +16,13 @@
 #define RANGE_DETECTOR_XSHUT_PIN GPIO_NUM_4
 // MB1013 PW output
 #define SONAR_PW_PIN GPIO_NUM_7
+// Data in of the Adafruit 2869 NeoPixel Stick (8 x SK6812 RGBW)
+#define LED_STRIP_PIN GPIO_NUM_3
+#define LED_COUNT 8
+
+// Keep the self-test dim: each LED draws up to about 18 mA per channel at full brightness
+static constexpr uint8_t LED_TEST_LEVEL = 32;
+static constexpr TickType_t LED_TEST_STEP = pdMS_TO_TICKS(150);
 
 // How often to try again when the range sensor is missing or not responding
 static constexpr TickType_t SENSOR_RETRY_DELAY = pdMS_TO_TICKS(5000);
@@ -35,6 +43,56 @@ static bool start_range_sensor(VL53L1X& sensor, const vl53l1x::Config& config)
         }
     ESP_LOGI("RANGE", "Range sensor ranging");
     return true;
+}
+
+static led_strip_handle_t create_led_strip()
+{
+    led_strip_config_t strip_config = {};
+    strip_config.strip_gpio_num = LED_STRIP_PIN;
+    strip_config.max_leds = LED_COUNT;
+    strip_config.led_model = LED_MODEL_SK6812;
+    strip_config.color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRBW;
+
+    led_strip_rmt_config_t rmt_config = {};
+    rmt_config.clk_src = RMT_CLK_SRC_DEFAULT;
+    rmt_config.resolution_hz = 10 * 1000 * 1000;
+
+    led_strip_handle_t strip = nullptr;
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &strip));
+    return strip;
+}
+
+// Light each LED in turn in red, green, blue and white, then all together, so a dead LED,
+// a wrong color order or a missing white channel is easy to spot
+static void led_self_test(led_strip_handle_t strip)
+{
+    struct Rgbw { uint8_t r, g, b, w; const char* name; };
+    const Rgbw colors[] = {
+        { LED_TEST_LEVEL, 0, 0, 0, "red" },
+        { 0, LED_TEST_LEVEL, 0, 0, "green" },
+        { 0, 0, LED_TEST_LEVEL, 0, "blue" },
+        { 0, 0, 0, LED_TEST_LEVEL, "white" },
+    };
+
+    for (const Rgbw& c : colors) {
+        ESP_LOGI("LED", "Self-test: %s chase", c.name);
+        for (int i = 0; i < LED_COUNT; i++) {
+            ESP_ERROR_CHECK(led_strip_clear(strip));
+            ESP_ERROR_CHECK(led_strip_set_pixel_rgbw(strip, i, c.r, c.g, c.b, c.w));
+            ESP_ERROR_CHECK(led_strip_refresh(strip));
+            vTaskDelay(LED_TEST_STEP);
+        }
+    }
+
+    ESP_LOGI("LED", "Self-test: all LEDs white");
+    for (int i = 0; i < LED_COUNT; i++) {
+        ESP_ERROR_CHECK(led_strip_set_pixel_rgbw(strip, i, 0, 0, 0, LED_TEST_LEVEL));
+    }
+    ESP_ERROR_CHECK(led_strip_refresh(strip));
+    vTaskDelay(LED_TEST_STEP * 4);
+
+    ESP_ERROR_CHECK(led_strip_clear(strip));
+    ESP_LOGI("LED", "Self-test done");
 }
 
 // Format a VL53L1X result: a distance, or why there is none
@@ -73,6 +131,10 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(range_device.init());
     // Only claims an RMT channel, so this works with or without the sonar connected
     ESP_ERROR_CHECK(sonar.init());
+
+    // Only claims an RMT channel, so this works with or without the stick connected
+    led_strip_handle_t led_strip = create_led_strip();
+    led_self_test(led_strip);
 
     vl53l1x::Config config;
     config.distance_mode = vl53l1x::DistanceMode::Long;
