@@ -11,3 +11,10 @@ set(COMPONENTS main)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(vl53l1x_host_test)
+
+# COVERAGE=1 instruments the vl53l1x component (including the ST ULD) for gcov; see run_host_tests.sh
+if("$ENV{COVERAGE}" STREQUAL "1")
+    idf_component_get_property(vl53l1x_lib vl53l1x COMPONENT_LIB)
+    target_compile_options(${vl53l1x_lib} PRIVATE --coverage -O0)
+    target_link_options(${CMAKE_PROJECT_NAME}.elf PRIVATE --coverage)
+endif()

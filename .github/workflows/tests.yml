@@ -91,10 +91,10 @@ jobs:
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && bash /work/components/mb1013/test_apps/host/run_host_tests.sh"
-      - name: Run VL53L1X host tests
+      - name: Run VL53L1X host tests with coverage
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
-          bash -c "cp -a /project /work && bash /work/components/vl53l1x/test_apps/host/run_host_tests.sh"
+          bash -c "cp -a /project /work && COVERAGE=1 bash /work/components/vl53l1x/test_apps/host/run_host_tests.sh"
 
   qemu-tests:
     name: QEMU tests (decoding on ESP32-C3)

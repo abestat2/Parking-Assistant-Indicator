@@ -6,9 +6,12 @@
 // VL53L1X_api.c, so including the source here gives access to it without editing ST's files.
 
 #include "VL53L1X_api.c"
+#include "vl53l1x_uld.h"
 
-const uint8_t* vl53l1x_uld_default_configuration(size_t* size)
+_Static_assert(sizeof(VL51L1X_DEFAULT_CONFIGURATION) == VL53L1X_DEFAULT_CONFIGURATION_SIZE,
+               "ULD default configuration no longer covers registers 0x2D to 0x87");
+
+const uint8_t* vl53l1x_uld_default_configuration(void)
 {
-    *size = sizeof(VL51L1X_DEFAULT_CONFIGURATION);
     return VL51L1X_DEFAULT_CONFIGURATION;
 }
