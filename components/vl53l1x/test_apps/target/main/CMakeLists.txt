@@ -7,6 +7,9 @@ idf_component_register(
         unity
         vl53l1x
         i2c_bus
+        esp_driver_gpio
+        esp_hw_support
+        esp_system
         esp_timer
     WHOLE_ARCHIVE
 )

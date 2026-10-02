@@ -4,7 +4,13 @@
 #include <cinttypes>
 #include <cstdio>
 #include "unity.h"
+#include "unity_test_runner.h"
+#include "driver/gpio.h"
+#include "esp_sleep.h"
+#include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 #include "I2cBus.hpp"
 #include "VL53L1X.hpp"
@@ -41,7 +47,7 @@ TEST_CASE("i2c_bus: init twice is rejected and probe finds only the sensor", "[v
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, rig.bus.init());
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, rig.device.init());
 
-    // Earlier tests leave XSHUT low, so power the sensor up through the driver
+    // Make sure the sensor is out of reset and booted
     VL53L1X sensor(rig.device, XSHUT_GPIO);
     TEST_ESP_OK(sensor.init());
     TEST_ESP_OK(rig.bus.probe(DEFAULT_ADDRESS));
@@ -100,14 +106,15 @@ TEST_CASE("hw: init and measure a distance", "[vl53l1x][hw]")
     }
 }
 
-TEST_CASE("hw: shutdown removes the sensor from the bus and wake restores it", "[vl53l1x][hw]")
+TEST_CASE("hw: shutdown keeps the sensor on the bus and wake resumes it quickly", "[vl53l1x][hw]")
 {
     Rig rig;
     VL53L1X sensor(rig.device, XSHUT_GPIO);
     TEST_ESP_OK(sensor.init());
+    TEST_ESP_OK(sensor.start_ranging());
     TEST_ESP_OK(sensor.shutdown());
-    // In hardware standby the sensor does not answer I2C
-    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, rig.bus.probe(DEFAULT_ADDRESS));
+    // Software standby still answers I2C
+    TEST_ESP_OK(rig.bus.probe(DEFAULT_ADDRESS));
 
     int64_t start = esp_timer_get_time();
     TEST_ESP_OK(sensor.wake());
@@ -117,7 +124,80 @@ TEST_CASE("hw: shutdown removes the sensor from the bus and wake restores it", "
     int64_t first_range_us = elapsed_us(start);
     printf("wake took %" PRId64 " us, first range %" PRId32 " mm after %" PRId64 " us\n", wake_us, range, first_range_us);
     TEST_ASSERT_GREATER_OR_EQUAL_INT32(0, range);
+    // Only a couple of I2C reads, no reinitialization
+    TEST_ASSERT_LESS_THAN_INT32(5000, static_cast<int32_t>(wake_us));
 }
+
+TEST_CASE("hw: init reuses an initialized sensor and fully initializes a reset one", "[vl53l1x][hw]")
+{
+    Rig rig;
+    {
+        VL53L1X sensor(rig.device, XSHUT_GPIO);
+        TEST_ESP_OK(sensor.init());
+    }
+
+    // Already initialized: only the configuration is written
+    int64_t reuse_us;
+    {
+        VL53L1X sensor(rig.device, XSHUT_GPIO);
+        int64_t start = esp_timer_get_time();
+        TEST_ESP_OK(sensor.init());
+        reuse_us = elapsed_us(start);
+    }
+
+    // Pulse XSHUT to reset the sensor. Its VHV registers return to reset values that differ from
+    // the ones the ULD initialization leaves, so init() must run the full initialization.
+    gpio_set_level(XSHUT_GPIO, 0);
+    vTaskDelay(pdMS_TO_TICKS(2));
+    gpio_set_level(XSHUT_GPIO, 1);
+    int64_t full_us;
+    {
+        VL53L1X sensor(rig.device, XSHUT_GPIO);
+        int64_t start = esp_timer_get_time();
+        TEST_ESP_OK(sensor.init());
+        full_us = elapsed_us(start);
+        TEST_ESP_OK(sensor.start_ranging());
+        TEST_ASSERT_GREATER_OR_EQUAL_INT32(0, sensor.read_range_mm(200));
+    }
+
+    printf("init reusing the sensor took %" PRId64 " us, full init %" PRId64 " us\n", reuse_us, full_us);
+    TEST_ASSERT_LESS_THAN_INT32(20000, static_cast<int32_t>(reuse_us));
+    // Full initialization includes one measurement with the 100 ms default timing budget
+    TEST_ASSERT_GREATER_THAN_INT32(50000, static_cast<int32_t>(full_us));
+}
+
+static void deep_sleep_stage_1()
+{
+    Rig rig;
+    VL53L1X sensor(rig.device, XSHUT_GPIO);
+    TEST_ESP_OK(sensor.init());
+    TEST_ESP_OK(sensor.start_ranging());
+    TEST_ASSERT_GREATER_OR_EQUAL_INT32(0, sensor.read_range_mm(200));
+    TEST_ESP_OK(sensor.prepare_for_deep_sleep());
+    esp_sleep_enable_timer_wakeup(1000 * 1000);
+    esp_deep_sleep_start();
+}
+
+static void deep_sleep_stage_2()
+{
+    TEST_ASSERT_EQUAL(ESP_RST_DEEPSLEEP, esp_reset_reason());
+    Rig rig;
+    VL53L1X sensor(rig.device, XSHUT_GPIO);
+    int64_t start = esp_timer_get_time();
+    TEST_ESP_OK(sensor.init());
+    int64_t init_us = elapsed_us(start);
+    gpio_deep_sleep_hold_dis();
+
+    TEST_ESP_OK(sensor.start_ranging());
+    int32_t range = sensor.read_range_mm(200);
+    printf("init after deep sleep took %" PRId64 " us, range %" PRId32 " mm\n", init_us, range);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT32(0, range);
+    // XSHUT was held high, so the sensor kept its initialization through the sleep
+    TEST_ASSERT_LESS_THAN_INT32(20000, static_cast<int32_t>(init_us));
+}
+
+TEST_CASE_MULTIPLE_STAGES("hw: sensor keeps its initialization through ESP32 deep sleep", "[vl53l1x][hw]",
+                          deep_sleep_stage_1, deep_sleep_stage_2);
 
 TEST_CASE("hw: narrow region of interest still measures", "[vl53l1x][hw]")
 {
@@ -165,15 +245,17 @@ TEST_CASE("hw: read after stop_ranging reports an error", "[vl53l1x][hw]")
     TEST_ASSERT_EQUAL_INT32(RANGE_ERROR, sensor.read_range_mm(200));
 }
 
-TEST_CASE("hw: wrong address fails init and leaves the sensor in standby", "[vl53l1x][hw]")
+TEST_CASE("hw: wrong address fails init and leaves the sensor powered", "[vl53l1x][hw]")
 {
     Rig rig;
     I2cMasterDevice wrong(rig.bus, UNUSED_ADDRESS);
     TEST_ESP_OK(wrong.init());
     VL53L1X sensor(wrong, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_ERR_TIMEOUT, sensor.init());
-    TEST_ASSERT_FALSE(sensor.is_awake());
-    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, rig.bus.probe(DEFAULT_ADDRESS));
+    TEST_ASSERT_FALSE(sensor.is_initialized());
+    // The reset attempt released XSHUT again, so the real sensor is back on the bus
+    vTaskDelay(pdMS_TO_TICKS(5));
+    TEST_ESP_OK(rig.bus.probe(DEFAULT_ADDRESS));
 }
 
 TEST_CASE("hw: 20 shutdown and wake cycles without leaking", "[vl53l1x][hw]")

@@ -1,7 +1,7 @@
 // Tier 2: driver logic, including the unmodified ST ULD, against a simulated sensor.
 // SimulatedSensor implements I2cDevice with a register map and the few behaviours the ULD relies
-// on (boot status, data-ready interrupt, ranging start/stop). XSHUT goes through the GPIO mock,
-// and time is simulated through the FreeRTOS mock.
+// on (boot status, data-ready interrupt, ranging start/stop, reset). XSHUT goes through the GPIO
+// mock, and time is simulated through the FreeRTOS mock.
 
 #include <array>
 #include <cstring>
@@ -23,6 +23,7 @@ static_assert(!std::is_copy_assignable_v<VL53L1X>, "VL53L1X must not be copy-ass
 static constexpr gpio_num_t XSHUT_GPIO = GPIO_NUM_4;
 
 // Registers used by the ULD (see VL53L1X_api.h)
+static constexpr uint16_t REG_SOFT_RESET = 0x0000;
 static constexpr uint16_t REG_VHV_LOOP_BOUND = 0x0008;
 static constexpr uint16_t REG_VHV_INIT = 0x000B;
 static constexpr uint16_t REG_GPIO_HV_MUX_CTRL = 0x0030;
@@ -39,6 +40,9 @@ static constexpr uint16_t REG_OSC_CALIBRATE_VAL = 0x00DE;
 static constexpr uint16_t REG_FIRMWARE_SYSTEM_STATUS = 0x00E5;
 static constexpr uint16_t REG_MODEL_ID = 0x010F;
 
+// First register of the ULD default configuration; a write here means a full initialization
+static constexpr uint16_t REG_DEFAULT_CONFIGURATION = 0x002D;
+
 // Raw RESULT__RANGE_STATUS values and the ULD statuses they map to
 static constexpr uint8_t RAW_VALID = 9;          // -> 0
 static constexpr uint8_t RAW_SIGMA_FAIL = 6;     // -> 1
@@ -52,6 +56,7 @@ struct Write {
     std::vector<uint8_t> data;
 };
 
+// A powered sensor, as on a breakout whose XSHUT pull-up holds it on until the host drives XSHUT
 class SimulatedSensor : public I2cDevice {
 public:
     SimulatedSensor() { power_on(); }
@@ -65,11 +70,14 @@ public:
 
     bool powered = false;
     bool ranging = false;
+    int power_ups = 0;
     std::vector<Write> writes;
     std::array<uint8_t, 0x10000> regs = {};
 
+    // Power-up or reset: registers return to their reset values and the sensor boots again
     void power_on() {
         powered = true;
+        power_ups++;
         ranging = false;
         m_ready = false;
         m_boot_polls_left = boot_polls;
@@ -81,6 +89,10 @@ public:
         regs[REG_OSC_CALIBRATE_VAL + 1] = 0xF4;
         // Reset value: active-high interrupt
         regs[REG_GPIO_HV_MUX_CTRL] = 0x01;
+        // Reset values of the VHV registers. They differ from the values the ULD's
+        // initialization leaves; the on-target tests check this on a real sensor.
+        regs[REG_VHV_LOOP_BOUND] = 0x81;
+        regs[REG_VHV_INIT] = 0x92;
     }
 
     void power_off() {
@@ -101,6 +113,15 @@ public:
     }
 
     bool data_ready() const { return m_ready; }
+
+    bool wrote(uint16_t index) const {
+        for (const Write& w : writes) {
+            if (w.index == index) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     esp_err_t write(const uint8_t* data, size_t size) override {
         if (!powered || fail_all || size < 2) {
@@ -136,7 +157,15 @@ private:
 
     void write_register(uint16_t index, uint8_t value) {
         regs[index] = value;
-        if (index == REG_MODE_START) {
+        if (index == REG_SOFT_RESET) {
+            // Writing 0 holds the sensor in reset; writing 1 releases it to boot again
+            if (value & 0x01) {
+                power_on();
+            } else {
+                ranging = false;
+                m_ready = false;
+            }
+        } else if (index == REG_MODE_START) {
             ranging = value == 0x40;
             if (ranging) {
                 start_measurement();
@@ -193,10 +222,11 @@ static esp_err_t stub_gpio_set_level(gpio_num_t gpio, uint32_t level, int calls)
 {
     TEST_ASSERT_EQUAL(XSHUT_GPIO, gpio);
     s_xshut_levels.push_back(static_cast<int>(level));
-    if (level) {
-        s_sensor->power_on();
-    } else {
+    // XSHUT low powers the sensor down; raising it again boots it from reset
+    if (!level) {
         s_sensor->power_off();
+    } else if (!s_sensor->powered) {
+        s_sensor->power_on();
     }
     return ESP_OK;
 }
@@ -243,14 +273,13 @@ extern "C" void tearDown(void)
     Mocktask_Destroy();
 }
 
-// Use a simulated sensor whose XSHUT is driven through the GPIO mock. It starts unpowered, as
-// the driver holds it in standby before booting it.
+// Drive the simulated sensor's XSHUT through the GPIO mock. init() releases any deep-sleep hold.
 static void attach_xshut(SimulatedSensor& sensor)
 {
     s_sensor = &sensor;
-    sensor.power_off();
     gpio_set_level_Stub(stub_gpio_set_level);
     gpio_config_Stub(stub_gpio_config);
+    gpio_hold_dis_IgnoreAndReturn(ESP_OK);
 }
 
 static Config test_config()
@@ -264,43 +293,40 @@ static Config test_config()
     return config;
 }
 
-static bool wrote(const SimulatedSensor& sensor, uint16_t index)
+static void assert_test_config_applied(const SimulatedSensor& sim)
 {
-    for (const Write& w : sensor.writes) {
-        if (w.index == index) {
-            return true;
-        }
-    }
-    return false;
+    // Short mode, 33 ms budget (short-mode register value), 8x6 ROI
+    TEST_ASSERT_EQUAL_UINT8(0x14, sim.regs[REG_PHASECAL_TIMEOUT]);
+    TEST_ASSERT_EQUAL_UINT16(0x00D6, sim.reg16(REG_TIMEOUT_MACROP_A_HI));
+    TEST_ASSERT_EQUAL_UINT8((6 - 1) << 4 | (8 - 1), sim.regs[REG_ROI_XY_SIZE]);
 }
 
 // ---- init() ----
 
-TEST_CASE("simulated: init holds XSHUT low, then boots and configures the sensor", "[vl53l1x][host]")
+TEST_CASE("simulated: init keeps XSHUT high, then initializes and configures the sensor", "[vl53l1x][host]")
 {
     SimulatedSensor sim;
     attach_xshut(sim);
     VL53L1X sensor(sim, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init(test_config()));
 
-    // XSHUT driven low before the pin becomes an output, then released to boot
+    // XSHUT set high before the pin becomes an output, so the sensor is never reset
     TEST_ASSERT_EQUAL(1, s_gpio_config_calls);
     TEST_ASSERT_EQUAL_UINT64(1ULL << XSHUT_GPIO, s_gpio_config.pin_bit_mask);
     TEST_ASSERT_EQUAL(GPIO_MODE_OUTPUT, s_gpio_config.mode);
-    TEST_ASSERT_EQUAL(2, s_xshut_levels.size());
-    TEST_ASSERT_EQUAL(0, s_xshut_levels[0]);
-    TEST_ASSERT_EQUAL(1, s_xshut_levels[1]);
+    TEST_ASSERT_EQUAL(1, s_xshut_levels.size());
+    TEST_ASSERT_EQUAL(1, s_xshut_levels[0]);
+    TEST_ASSERT_EQUAL(1, sim.power_ups);
 
-    TEST_ASSERT_TRUE(sensor.is_awake());
+    TEST_ASSERT_TRUE(sensor.is_initialized());
+    TEST_ASSERT_FALSE(sensor.is_ranging());
     TEST_ASSERT_FALSE(sim.ranging);
     TEST_ASSERT_EQUAL_UINT8(255, sensor.last_range_status());
+    TEST_ASSERT_TRUE(sim.wrote(REG_DEFAULT_CONFIGURATION));
     TEST_ASSERT_EQUAL_UINT8(0x09, sim.regs[REG_VHV_LOOP_BOUND]);
     TEST_ASSERT_EQUAL_UINT8(0x00, sim.regs[REG_VHV_INIT]);
 
-    // Short mode, 33 ms budget (short-mode register value), 8x6 ROI
-    TEST_ASSERT_EQUAL_UINT8(0x14, sim.regs[REG_PHASECAL_TIMEOUT]);
-    TEST_ASSERT_EQUAL_UINT16(0x00D6, sim.reg16(REG_TIMEOUT_MACROP_A_HI));
-    TEST_ASSERT_EQUAL_UINT8((6 - 1) << 4 | (8 - 1), sim.regs[REG_ROI_XY_SIZE]);
+    assert_test_config_applied(sim);
     // 0x1F4 oscillator value x 100 ms x 1.075
     TEST_ASSERT_UINT32_WITHIN(1, 53750, sim.reg32(REG_INTERMEASUREMENT_PERIOD));
 }
@@ -312,14 +338,18 @@ TEST_CASE("simulated: default configuration is written in one transaction", "[vl
     VL53L1X sensor(sim, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
 
-    // 0x2D through 0x87, ending with ranging stopped
-    TEST_ASSERT_GREATER_THAN(0, sim.writes.size());
-    const Write& first = sim.writes[0];
-    TEST_ASSERT_EQUAL_HEX16(0x2D, first.index);
-    TEST_ASSERT_EQUAL(0x87 - 0x2D + 1, first.data.size());
-    TEST_ASSERT_EQUAL_HEX8(0x00, first.data.back());
+    // 0x2D through 0x87 in one write, ending with ranging stopped
+    const Write* config_write = nullptr;
+    for (const Write& w : sim.writes) {
+        if (w.index == REG_DEFAULT_CONFIGURATION) {
+            config_write = &w;
+        }
+    }
+    TEST_ASSERT_NOT_NULL(config_write);
+    TEST_ASSERT_EQUAL(0x87 - 0x2D + 1, config_write->data.size());
+    TEST_ASSERT_EQUAL_HEX8(0x00, config_write->data.back());
 
-    // Default config is long mode with a 50 ms budget
+    // Default config is long mode with a 50 ms budget and the full ROI
     TEST_ASSERT_EQUAL_UINT8(0x0A, sim.regs[REG_PHASECAL_TIMEOUT]);
     TEST_ASSERT_EQUAL_UINT16(0x00AD, sim.reg16(REG_TIMEOUT_MACROP_A_HI));
     TEST_ASSERT_EQUAL_UINT8(0xFF, sim.regs[REG_ROI_XY_SIZE]);
@@ -334,7 +364,7 @@ TEST_CASE("simulated: invalid config is rejected without touching the hardware",
     // No GPIO stubs are installed, so any GPIO call fails the test
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sensor.init(config));
     TEST_ASSERT_TRUE(sim.writes.empty());
-    TEST_ASSERT_FALSE(sensor.is_awake());
+    TEST_ASSERT_FALSE(sensor.is_initialized());
 }
 
 TEST_CASE("simulated: second init returns invalid state and keeps the sensor working", "[vl53l1x][host]")
@@ -357,42 +387,76 @@ TEST_CASE("simulated: init waits for the sensor to finish booting", "[vl53l1x][h
 {
     SimulatedSensor sim;
     sim.boot_polls = 3;
+    sim.power_on();
     attach_xshut(sim);
     VL53L1X sensor(sim, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
-    TEST_ASSERT_TRUE(sensor.is_awake());
+    TEST_ASSERT_TRUE(sensor.is_initialized());
     TEST_ASSERT_EQUAL(3, s_delay_calls);
 }
 
-TEST_CASE("simulated: sensor that never boots times out and is left in standby", "[vl53l1x][host]")
+TEST_CASE("simulated: init boots a sensor that was held in reset", "[vl53l1x][host]")
+{
+    SimulatedSensor sim;
+    sim.power_off();
+    attach_xshut(sim);
+    VL53L1X sensor(sim, XSHUT_GPIO);
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
+    TEST_ASSERT_TRUE(sim.powered);
+    TEST_ASSERT_TRUE(sim.wrote(REG_DEFAULT_CONFIGURATION));
+}
+
+TEST_CASE("simulated: unresponsive sensor is reset through XSHUT and recovers", "[vl53l1x][host]")
 {
     SimulatedSensor sim;
     sim.boot_polls = NEVER;
+    sim.power_on();
+    // After the reset it boots normally
+    sim.boot_polls = 0;
+    attach_xshut(sim);
+    VL53L1X sensor(sim, XSHUT_GPIO);
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
+
+    // High at init, then a low pulse to reset
+    TEST_ASSERT_EQUAL(3, s_xshut_levels.size());
+    TEST_ASSERT_EQUAL(1, s_xshut_levels[0]);
+    TEST_ASSERT_EQUAL(0, s_xshut_levels[1]);
+    TEST_ASSERT_EQUAL(1, s_xshut_levels[2]);
+    TEST_ASSERT_TRUE(sim.wrote(REG_DEFAULT_CONFIGURATION));
+    TEST_ASSERT_TRUE(sensor.is_initialized());
+}
+
+TEST_CASE("simulated: sensor that never boots times out after one reset attempt", "[vl53l1x][host]")
+{
+    SimulatedSensor sim;
+    sim.boot_polls = NEVER;
+    sim.power_on();
     attach_xshut(sim);
     VL53L1X sensor(sim, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_ERR_TIMEOUT, sensor.init());
 
-    TEST_ASSERT_FALSE(sensor.is_awake());
-    TEST_ASSERT_FALSE(sim.powered);
-    TEST_ASSERT_EQUAL(0, s_xshut_levels.back());
-    // Gave up after about the 100 ms boot timeout
-    TEST_ASSERT_UINT32_WITHIN(pdMS_TO_TICKS(20) + 1, pdMS_TO_TICKS(100), s_ticks);
+    TEST_ASSERT_FALSE(sensor.is_initialized());
+    // Two 100 ms boot timeouts, with the reset pulse between them; XSHUT is left high
+    TEST_ASSERT_UINT32_WITHIN(pdMS_TO_TICKS(20) + 2, pdMS_TO_TICKS(200), s_ticks);
+    TEST_ASSERT_EQUAL(1, s_xshut_levels.back());
 
     // The failed init released everything, so it can be retried
     sim.boot_polls = 0;
+    sim.power_on();
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
-    TEST_ASSERT_TRUE(sensor.is_awake());
+    TEST_ASSERT_TRUE(sensor.is_initialized());
 }
 
 TEST_CASE("simulated: device with the wrong model ID is rejected", "[vl53l1x][host]")
 {
     SimulatedSensor sim;
     sim.model_id = 0xEEAA;
+    sim.power_on();
     attach_xshut(sim);
     VL53L1X sensor(sim, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sensor.init());
-    TEST_ASSERT_FALSE(sensor.is_awake());
-    TEST_ASSERT_FALSE(sim.powered);
+    TEST_ASSERT_FALSE(sensor.is_initialized());
+    TEST_ASSERT_FALSE(sim.wrote(REG_DEFAULT_CONFIGURATION));
 }
 
 TEST_CASE("simulated: init times out instead of hanging when the first measurement never arrives", "[vl53l1x][host]")
@@ -402,20 +466,19 @@ TEST_CASE("simulated: init times out instead of hanging when the first measureme
     attach_xshut(sim);
     VL53L1X sensor(sim, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_ERR_TIMEOUT, sensor.init());
-    TEST_ASSERT_FALSE(sensor.is_awake());
-    TEST_ASSERT_FALSE(sim.powered);
-    TEST_ASSERT_UINT32_WITHIN(pdMS_TO_TICKS(20) + 1, pdMS_TO_TICKS(500), s_ticks);
+    TEST_ASSERT_FALSE(sensor.is_initialized());
+    // Two 500 ms waits, with the reset pulse between them
+    TEST_ASSERT_UINT32_WITHIN(pdMS_TO_TICKS(20) + 2, pdMS_TO_TICKS(1000), s_ticks);
 }
 
 TEST_CASE("simulated: I2C failure while writing the configuration fails init", "[vl53l1x][host]")
 {
     SimulatedSensor sim;
-    sim.fail_writes_to = 0x2D;
+    sim.fail_writes_to = REG_DEFAULT_CONFIGURATION;
     attach_xshut(sim);
     VL53L1X sensor(sim, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_FAIL, sensor.init());
-    TEST_ASSERT_FALSE(sensor.is_awake());
-    TEST_ASSERT_FALSE(sim.powered);
+    TEST_ASSERT_FALSE(sensor.is_initialized());
 }
 
 TEST_CASE("simulated: I2C failure while applying the configuration fails init", "[vl53l1x][host]")
@@ -425,7 +488,7 @@ TEST_CASE("simulated: I2C failure while applying the configuration fails init", 
     attach_xshut(sim);
     VL53L1X sensor(sim, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_FAIL, sensor.init());
-    TEST_ASSERT_FALSE(sensor.is_awake());
+    TEST_ASSERT_FALSE(sensor.is_initialized());
 }
 
 TEST_CASE("simulated: GPIO configuration failure is passed through", "[vl53l1x][host]")
@@ -441,20 +504,74 @@ TEST_CASE("simulated: GPIO configuration failure is passed through", "[vl53l1x][
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
 }
 
-TEST_CASE("simulated: without XSHUT the sensor is used as already powered", "[vl53l1x][host]")
+TEST_CASE("simulated: without XSHUT an unresponsive sensor is recovered by a software reset", "[vl53l1x][host]")
 {
     SimulatedSensor sim;
+    sim.boot_polls = NEVER;
+    sim.power_on();
+    sim.boot_polls = 0;
     // No GPIO stubs are installed, so any GPIO call fails the test
     VL53L1X sensor(sim);
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
-    TEST_ASSERT_TRUE(sensor.is_awake());
-    TEST_ASSERT_EQUAL(ESP_ERR_NOT_SUPPORTED, sensor.shutdown());
-    TEST_ASSERT_TRUE(sensor.is_awake());
+    TEST_ASSERT_TRUE(sim.wrote(REG_SOFT_RESET));
+    // Construction, the power_on() above, then the software reset
+    TEST_ASSERT_EQUAL(3, sim.power_ups);
 
     TEST_ASSERT_EQUAL(ESP_OK, sensor.start_ranging());
-    sensor.deinit();
-    // deinit stops ranging when it cannot power the sensor down
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.shutdown());
     TEST_ASSERT_FALSE(sim.ranging);
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.prepare_for_deep_sleep());
+}
+
+// ---- Reusing an initialized sensor ----
+
+TEST_CASE("simulated: init after an ESP32 restart reuses the initialized sensor", "[vl53l1x][host]")
+{
+    SimulatedSensor sim;
+    attach_xshut(sim);
+    {
+        // Before the restart: initialized by an earlier boot
+        VL53L1X before(sim, XSHUT_GPIO);
+        TEST_ASSERT_EQUAL(ESP_OK, before.init());
+    }
+    // A restart can also happen while the sensor is ranging (a crash, or the watchdog)
+    const uint8_t start_ranging[] = { 0x00, 0x87, 0x40 };
+    TEST_ASSERT_EQUAL(ESP_OK, sim.write(start_ranging, sizeof(start_ranging)));
+    TEST_ASSERT_TRUE(sim.ranging);
+    sim.writes.clear();
+
+    TickType_t start = s_ticks;
+    VL53L1X sensor(sim, XSHUT_GPIO);
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.init(test_config()));
+
+    // No reset, no default configuration and no initial measurement; only the new configuration
+    TEST_ASSERT_EQUAL(1, sim.power_ups);
+    TEST_ASSERT_FALSE(sim.wrote(REG_DEFAULT_CONFIGURATION));
+    TEST_ASSERT_EQUAL_UINT32(start, s_ticks);
+    TEST_ASSERT_FALSE(sim.ranging);
+    TEST_ASSERT_FALSE(sim.data_ready());
+    assert_test_config_applied(sim);
+
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.start_ranging());
+    sim.set_result(RAW_VALID, 456);
+    TEST_ASSERT_EQUAL_INT32(456, sensor.read_range_mm(100));
+}
+
+TEST_CASE("simulated: init after the sensor lost power initializes it fully", "[vl53l1x][host]")
+{
+    SimulatedSensor sim;
+    attach_xshut(sim);
+    {
+        VL53L1X before(sim, XSHUT_GPIO);
+        TEST_ASSERT_EQUAL(ESP_OK, before.init());
+    }
+    sim.power_off();
+    sim.power_on();
+    sim.writes.clear();
+
+    VL53L1X sensor(sim, XSHUT_GPIO);
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
+    TEST_ASSERT_TRUE(sim.wrote(REG_DEFAULT_CONFIGURATION));
 }
 
 // ---- ranging ----
@@ -467,6 +584,7 @@ TEST_CASE("simulated: read returns the measured distance and clears the interrup
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
     TEST_ASSERT_EQUAL(ESP_OK, sensor.start_ranging());
     TEST_ASSERT_TRUE(sim.ranging);
+    TEST_ASSERT_TRUE(sensor.is_ranging());
 
     sim.polls_until_ready = 2;
     sim.set_result(RAW_VALID, 1234);
@@ -554,7 +672,7 @@ TEST_CASE("simulated: I2C failure during a read reports an error", "[vl53l1x][ho
 
 // ---- shutdown() and wake() ----
 
-TEST_CASE("simulated: shutdown pulls XSHUT low and wake restores the configuration", "[vl53l1x][host]")
+TEST_CASE("simulated: shutdown is software standby and wake resumes without reinitializing", "[vl53l1x][host]")
 {
     SimulatedSensor sim;
     attach_xshut(sim);
@@ -562,55 +680,79 @@ TEST_CASE("simulated: shutdown pulls XSHUT low and wake restores the configurati
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init(test_config()));
     TEST_ASSERT_EQUAL(ESP_OK, sensor.start_ranging());
 
+    size_t levels = s_xshut_levels.size();
     TEST_ASSERT_EQUAL(ESP_OK, sensor.shutdown());
-    TEST_ASSERT_EQUAL(0, s_xshut_levels.back());
-    TEST_ASSERT_FALSE(sim.powered);
-    TEST_ASSERT_FALSE(sensor.is_awake());
-    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, sensor.start_ranging());
+    // XSHUT untouched, sensor powered but not ranging
+    TEST_ASSERT_EQUAL(levels, s_xshut_levels.size());
+    TEST_ASSERT_TRUE(sim.powered);
+    TEST_ASSERT_FALSE(sim.ranging);
+    TEST_ASSERT_FALSE(sensor.is_ranging());
     TEST_ASSERT_EQUAL_INT32(RANGE_ERROR, sensor.read_range_mm(100));
+    // Shutting down again does nothing
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.shutdown());
 
-    // Power-up cleared the simulated registers, so the configuration must be written again
     sim.writes.clear();
+    TickType_t start = s_ticks;
     TEST_ASSERT_EQUAL(ESP_OK, sensor.wake());
-    TEST_ASSERT_TRUE(sensor.is_awake());
-    TEST_ASSERT_TRUE(wrote(sim, 0x2D));
-    TEST_ASSERT_EQUAL_UINT8(0x14, sim.regs[REG_PHASECAL_TIMEOUT]);
-    TEST_ASSERT_EQUAL_UINT8((6 - 1) << 4 | (8 - 1), sim.regs[REG_ROI_XY_SIZE]);
+    TEST_ASSERT_TRUE(sim.writes.empty());
+    TEST_ASSERT_EQUAL_UINT32(start, s_ticks);
+    assert_test_config_applied(sim);
 
     TEST_ASSERT_EQUAL(ESP_OK, sensor.start_ranging());
     sim.set_result(RAW_VALID, 321);
     TEST_ASSERT_EQUAL_INT32(321, sensor.read_range_mm(100));
+    // Wake while ranging does nothing
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.wake());
+    TEST_ASSERT_TRUE(sim.ranging);
 }
 
-TEST_CASE("simulated: shutdown and wake before init report invalid state", "[vl53l1x][host]")
+TEST_CASE("simulated: wake reinitializes a sensor that lost power", "[vl53l1x][host]")
+{
+    SimulatedSensor sim;
+    attach_xshut(sim);
+    VL53L1X sensor(sim, XSHUT_GPIO);
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.init(test_config()));
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.shutdown());
+
+    sim.power_off();
+    sim.power_on();
+    sim.writes.clear();
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.wake());
+    TEST_ASSERT_TRUE(sim.wrote(REG_DEFAULT_CONFIGURATION));
+    assert_test_config_applied(sim);
+}
+
+TEST_CASE("simulated: wake on an unresponsive sensor resets it, and fails if it stays silent", "[vl53l1x][host]")
+{
+    SimulatedSensor sim;
+    attach_xshut(sim);
+    VL53L1X sensor(sim, XSHUT_GPIO);
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
+
+    sim.fail_all = true;
+    TEST_ASSERT_EQUAL(ESP_ERR_TIMEOUT, sensor.wake());
+    TEST_ASSERT_EQUAL(0, s_xshut_levels[s_xshut_levels.size() - 2]);
+    TEST_ASSERT_EQUAL(1, s_xshut_levels.back());
+    // Still initialized, so wake can be retried
+    TEST_ASSERT_TRUE(sensor.is_initialized());
+
+    sim.fail_all = false;
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.wake());
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.start_ranging());
+    sim.set_result(RAW_VALID, 999);
+    TEST_ASSERT_EQUAL_INT32(999, sensor.read_range_mm(100));
+}
+
+TEST_CASE("simulated: shutdown, wake and deep-sleep preparation before init report invalid state", "[vl53l1x][host]")
 {
     SimulatedSensor sim;
     VL53L1X sensor(sim, XSHUT_GPIO);
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, sensor.shutdown());
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, sensor.wake());
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, sensor.prepare_for_deep_sleep());
 }
 
-TEST_CASE("simulated: failed wake leaves the sensor in standby and a later wake recovers", "[vl53l1x][host]")
-{
-    SimulatedSensor sim;
-    attach_xshut(sim);
-    VL53L1X sensor(sim, XSHUT_GPIO);
-    TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
-    TEST_ASSERT_EQUAL(ESP_OK, sensor.shutdown());
-
-    sim.boot_polls = NEVER;
-    TEST_ASSERT_EQUAL(ESP_ERR_TIMEOUT, sensor.wake());
-    TEST_ASSERT_FALSE(sensor.is_awake());
-    TEST_ASSERT_FALSE(sim.powered);
-
-    sim.boot_polls = 0;
-    TEST_ASSERT_EQUAL(ESP_OK, sensor.wake());
-    TEST_ASSERT_TRUE(sensor.is_awake());
-}
-
-// ---- lifecycle ----
-
-TEST_CASE("simulated: deinit leaves XSHUT low and can be repeated", "[vl53l1x][host]")
+TEST_CASE("simulated: prepare_for_deep_sleep stops ranging and holds XSHUT high", "[vl53l1x][host]")
 {
     SimulatedSensor sim;
     attach_xshut(sim);
@@ -618,28 +760,61 @@ TEST_CASE("simulated: deinit leaves XSHUT low and can be repeated", "[vl53l1x][h
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
     TEST_ASSERT_EQUAL(ESP_OK, sensor.start_ranging());
 
-    sensor.deinit();
-    TEST_ASSERT_FALSE(sim.powered);
-    TEST_ASSERT_FALSE(sensor.is_awake());
+    gpio_hold_en_ExpectAndReturn(XSHUT_GPIO, ESP_OK);
+    gpio_deep_sleep_hold_en_Expect();
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.prepare_for_deep_sleep());
+    TEST_ASSERT_FALSE(sim.ranging);
+    TEST_ASSERT_TRUE(sim.powered);
+    TEST_ASSERT_EQUAL(1, s_xshut_levels.back());
+}
+
+TEST_CASE("simulated: prepare_for_deep_sleep passes through a hold failure", "[vl53l1x][host]")
+{
+    SimulatedSensor sim;
+    attach_xshut(sim);
+    VL53L1X sensor(sim, XSHUT_GPIO);
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
+
+    gpio_hold_en_ExpectAndReturn(XSHUT_GPIO, ESP_ERR_NOT_SUPPORTED);
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_SUPPORTED, sensor.prepare_for_deep_sleep());
+}
+
+// ---- lifecycle ----
+
+TEST_CASE("simulated: deinit stops ranging, leaves the sensor powered and can be repeated", "[vl53l1x][host]")
+{
+    SimulatedSensor sim;
+    attach_xshut(sim);
+    VL53L1X sensor(sim, XSHUT_GPIO);
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
+    TEST_ASSERT_EQUAL(ESP_OK, sensor.start_ranging());
+
     size_t levels = s_xshut_levels.size();
+    sensor.deinit();
+    TEST_ASSERT_FALSE(sim.ranging);
+    TEST_ASSERT_TRUE(sim.powered);
+    TEST_ASSERT_FALSE(sensor.is_initialized());
     sensor.deinit();
     TEST_ASSERT_EQUAL(levels, s_xshut_levels.size());
     TEST_ASSERT_EQUAL_INT32(RANGE_ERROR, sensor.read_range_mm(100));
 
-    // A deinitialized sensor can be initialized again
+    // A deinitialized sensor can be initialized again, reusing the sensor's state
+    sim.writes.clear();
     TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
+    TEST_ASSERT_FALSE(sim.wrote(REG_DEFAULT_CONFIGURATION));
 }
 
-TEST_CASE("simulated: destructor puts the sensor in standby", "[vl53l1x][host]")
+TEST_CASE("simulated: destructor stops ranging", "[vl53l1x][host]")
 {
     SimulatedSensor sim;
     attach_xshut(sim);
     {
         VL53L1X sensor(sim, XSHUT_GPIO);
         TEST_ASSERT_EQUAL(ESP_OK, sensor.init());
-        TEST_ASSERT_TRUE(sim.powered);
+        TEST_ASSERT_EQUAL(ESP_OK, sensor.start_ranging());
     }
-    TEST_ASSERT_FALSE(sim.powered);
+    TEST_ASSERT_FALSE(sim.ranging);
+    TEST_ASSERT_TRUE(sim.powered);
 }
 
 TEST_CASE("simulated: several sensors work side by side up to the limit", "[vl53l1x][host]")
