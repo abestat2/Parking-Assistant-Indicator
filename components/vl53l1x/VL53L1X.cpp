@@ -16,8 +16,6 @@ extern "C" {
 
 using namespace vl53l1x;
 
-// First register written by the ULD default configuration
-static constexpr uint16_t DEFAULT_CONFIGURATION_START = 0x2D;
 // VHV (temperature calibration) register set after the first measurement, as in VL53L1X_SensorInit()
 static constexpr uint16_t VHV_CONFIG__INIT = 0x0B;
 // Values VL53L1X_SensorInit() leaves in the VHV registers. Nothing else in the ULD writes them,
@@ -214,19 +212,19 @@ esp_err_t VL53L1X::try_bring_up(bool allow_reuse) {
     return apply_config();
 }
 
-esp_err_t VL53L1X::hard_reset() {
+void VL53L1X::hard_reset() {
     m_ranging = false;
     if (m_xshut_gpio != GPIO_NUM_NC) {
         gpio_set_level(m_xshut_gpio, 0);
         delay_ms(1);
         gpio_set_level(m_xshut_gpio, 1);
-        return ESP_OK;
+        return;
     }
-    // Without XSHUT, use the software reset. It fails harmlessly if the sensor is not responding.
-    int8_t status = VL53L1_WrByte(m_dev, SOFT_RESET, 0x00);
+    // Without XSHUT, use the software reset. If the sensor is not responding the writes fail,
+    // and the setup attempt that follows reports the error.
+    VL53L1_WrByte(m_dev, SOFT_RESET, 0x00);
     delay_ms(1);
-    status |= VL53L1_WrByte(m_dev, SOFT_RESET, 0x01);
-    return status == 0 ? ESP_OK : ESP_FAIL;
+    VL53L1_WrByte(m_dev, SOFT_RESET, 0x01);
 }
 
 esp_err_t VL53L1X::wait_for_boot() {
@@ -262,14 +260,11 @@ bool VL53L1X::is_uld_initialized() {
 esp_err_t VL53L1X::sensor_init() {
     // Same sequence as VL53L1X_SensorInit(), but with the configuration written in one transaction
     // and a timeout on the first measurement
-    size_t size = 0;
-    const uint8_t* defaults = vl53l1x_uld_default_configuration(&size);
-    uint8_t configuration[128];
-    ESP_RETURN_ON_FALSE(size <= sizeof(configuration), ESP_ERR_INVALID_SIZE, TAG, "Configuration too large");
     // The ULD write functions take a non-const buffer
-    std::memcpy(configuration, defaults, size);
+    uint8_t configuration[VL53L1X_DEFAULT_CONFIGURATION_SIZE];
+    std::memcpy(configuration, vl53l1x_uld_default_configuration(), sizeof(configuration));
 
-    int8_t status = VL53L1_WriteMulti(m_dev, DEFAULT_CONFIGURATION_START, configuration, size);
+    int8_t status = VL53L1_WriteMulti(m_dev, VL53L1X_DEFAULT_CONFIGURATION_START, configuration, sizeof(configuration));
     status |= VL53L1X_StartRanging(m_dev);
     ESP_RETURN_ON_FALSE(status == 0, ESP_FAIL, TAG, "Failed to write the default configuration");
 

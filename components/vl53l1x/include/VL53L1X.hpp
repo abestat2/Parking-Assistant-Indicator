@@ -139,7 +139,7 @@ private:
 
     esp_err_t bring_up(bool allow_reuse);
     esp_err_t try_bring_up(bool allow_reuse);
-    esp_err_t hard_reset();
+    void hard_reset();
     esp_err_t wait_for_boot();
     esp_err_t check_model_id();
     bool is_uld_initialized();

@@ -24,8 +24,3 @@ uint16_t register_device(I2cDevice& device);
 void unregister_device(uint16_t dev);
 
 } // namespace vl53l1x::platform
-
-extern "C" {
-// Defined in vl53l1x_uld.c, where the ST driver's default configuration table is visible
-const uint8_t* vl53l1x_uld_default_configuration(size_t* size);
-}
