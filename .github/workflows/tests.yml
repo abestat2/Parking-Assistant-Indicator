@@ -56,6 +56,10 @@ jobs:
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && cd /work/components/mb1013/test_apps/target && idf.py -B /tmp/build build"
+      - name: Build VL53L1X on-target test app
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && cd /work/components/vl53l1x/test_apps/target && idf.py -B /tmp/build build"
       - name: Build detection link on-target test app
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
@@ -87,6 +91,14 @@ jobs:
             Write-Host "::error::Cannot reach the Docker engine as $env:USERNAME. Check that Docker Desktop is running (it starts when its user signs in to Windows) and that this account is in the docker-users group. A service account only picks up a new group membership after a reboot."
             exit 1
           }
+      - name: Run MB1013 host tests
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/components/mb1013/test_apps/host/run_host_tests.sh"
+      - name: Run VL53L1X host tests with coverage
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && COVERAGE=1 bash /work/components/vl53l1x/test_apps/host/run_host_tests.sh"
       - name: Empty the coverage folder
         # Each test container writes its coverage here; the folder outlives the job on this runner
         run: |
@@ -184,6 +196,10 @@ jobs:
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
           bash -c "cp -a /project /work && bash /work/components/mb1013/test_apps/target/run_qemu_tests.sh"
+      - name: Run VL53L1X QEMU tests
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
+          bash -c "cp -a /project /work && bash /work/components/vl53l1x/test_apps/target/run_qemu_tests.sh"
       - name: Run detection link QEMU tests
         if: ${{ !cancelled() }}
         run: >

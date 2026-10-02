@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS
+        "test_main.cpp"
+        "test_driver_simulated.cpp"
+        "test_platform.cpp"
+        "../../common/test_config.cpp"
+    # test_platform.cpp tests the component's private ULD platform layer directly
+    PRIV_INCLUDE_DIRS
+        "../../.."
+        "../../../st_uld/platform"
+    PRIV_REQUIRES
+        unity
+        cmock
+        vl53l1x
+        i2c_bus
+        driver
+        freertos
+    WHOLE_ARCHIVE
+)
