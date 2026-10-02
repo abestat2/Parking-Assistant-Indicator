@@ -4,6 +4,7 @@ idf_component_register(
     PRIV_REQUIRES
         i2c_bus
         vl53l1x
+        mb1013
         esp_wifi
         esp_http_server
         nvs_flash
