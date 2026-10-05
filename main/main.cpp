@@ -8,7 +8,8 @@
 #include "I2cBus.hpp"
 #include "VL53L1X.hpp"
 #include "MB1013.hpp"
-#include "led_strip.h"
+//#include "led_strip.h"
+#include "ParkingIndicator.hpp"
 
 // Qwiic connector on the SparkFun Pro Micro ESP32-C3
 #define I2C_SDA_PIN GPIO_NUM_5
@@ -18,7 +19,9 @@
 #define SONAR_PW_PIN GPIO_NUM_7
 // Data in of the Adafruit 2869 NeoPixel Stick (8 x SK6812 RGBW)
 #define LED_STRIP_PIN GPIO_NUM_3
+
 #define LED_COUNT 8
+
 
 // Keep the self-test dim: each LED draws up to about 18 mA per channel at full brightness
 static constexpr uint8_t LED_TEST_LEVEL = 32;
@@ -45,56 +48,6 @@ static bool start_range_sensor(VL53L1X& sensor, const vl53l1x::Config& config)
     return true;
 }
 
-static led_strip_handle_t create_led_strip()
-{
-    led_strip_config_t strip_config = {};
-    strip_config.strip_gpio_num = LED_STRIP_PIN;
-    strip_config.max_leds = LED_COUNT;
-    strip_config.led_model = LED_MODEL_SK6812;
-    strip_config.color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRBW;
-
-    led_strip_rmt_config_t rmt_config = {};
-    rmt_config.clk_src = RMT_CLK_SRC_DEFAULT;
-    rmt_config.resolution_hz = 10 * 1000 * 1000;
-
-    led_strip_handle_t strip = nullptr;
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &strip));
-    return strip;
-}
-
-// Light each LED in turn in red, green, blue and white, then all together, so a dead LED,
-// a wrong color order or a missing white channel is easy to spot
-static void led_self_test(led_strip_handle_t strip)
-{
-    struct Rgbw { uint8_t r, g, b, w; const char* name; };
-    const Rgbw colors[] = {
-        { LED_TEST_LEVEL, 0, 0, 0, "red" },
-        { 0, LED_TEST_LEVEL, 0, 0, "green" },
-        { 0, 0, LED_TEST_LEVEL, 0, "blue" },
-        { 0, 0, 0, LED_TEST_LEVEL, "white" },
-    };
-
-    for (const Rgbw& c : colors) {
-        ESP_LOGI("LED", "Self-test: %s chase", c.name);
-        for (int i = 0; i < LED_COUNT; i++) {
-            ESP_ERROR_CHECK(led_strip_clear(strip));
-            ESP_ERROR_CHECK(led_strip_set_pixel_rgbw(strip, i, c.r, c.g, c.b, c.w));
-            ESP_ERROR_CHECK(led_strip_refresh(strip));
-            vTaskDelay(LED_TEST_STEP);
-        }
-    }
-
-    ESP_LOGI("LED", "Self-test: all LEDs white");
-    for (int i = 0; i < LED_COUNT; i++) {
-        ESP_ERROR_CHECK(led_strip_set_pixel_rgbw(strip, i, 0, 0, 0, LED_TEST_LEVEL));
-    }
-    ESP_ERROR_CHECK(led_strip_refresh(strip));
-    vTaskDelay(LED_TEST_STEP * 4);
-
-    ESP_ERROR_CHECK(led_strip_clear(strip));
-    ESP_LOGI("LED", "Self-test done");
-}
-
 // Format a VL53L1X result: a distance, or why there is none
 static void describe_lidar(char* text, size_t size, int32_t range)
 {
@@ -118,7 +71,6 @@ static void describe_sonar(char* text, size_t size, int32_t range)
     }
 }
 
-
 extern "C" void app_main(void)
 {
     // The board and the Adafruit breakout both have I2C pull-ups, so the internal ones stay off
@@ -132,9 +84,9 @@ extern "C" void app_main(void)
     // Only claims an RMT channel, so this works with or without the sonar connected
     ESP_ERROR_CHECK(sonar.init());
 
-    // Only claims an RMT channel, so this works with or without the stick connected
-    led_strip_handle_t led_strip = create_led_strip();
-    led_self_test(led_strip);
+    ParkingIndicator parking_indicator(LED_STRIP_PIN);
+    parking_indicator.enable_indicator();
+    parking_indicator.clear_indicator();
 
     vl53l1x::Config config;
     config.distance_mode = vl53l1x::DistanceMode::Long;
@@ -160,6 +112,11 @@ extern "C" void app_main(void)
     int read_errors = 0;
     bool retry_pending = false;
     TickType_t last_attempt = 0;
+
+    uint8_t led_update_counter = 0;
+    uint8_t led_update_step = 0;
+    LEDColor green = {0, 255, 0, 0};
+    LEDColor red = {255, 0, 0, 0};
     while (true) {
         if (!range_sensor.is_ranging() && (!retry_pending || xTaskGetTickCount() - last_attempt >= SENSOR_RETRY_DELAY)) {
             last_attempt = xTaskGetTickCount();
@@ -192,5 +149,25 @@ extern "C" void app_main(void)
         describe_lidar(lidar_text, sizeof(lidar_text), lidar);
         describe_sonar(sonar_text, sizeof(sonar_text), sonar_range);
         ESP_LOGI("RANGE", "Lidar: %s | Sonar: %s", lidar_text, sonar_text);
+
+        if(led_update_step < 10) {
+            led_update_step++;
+        }
+        else {
+            led_update_step = 0;
+            if(led_update_counter < LED_COUNT) {
+                parking_indicator.set_indicator_color(&green);
+                float level = ((LED_COUNT - led_update_counter) * 100.0f) / LED_COUNT;
+                parking_indicator.write_indicator_level(level);
+                ESP_LOGI("LED", "Updated LED to green, level: %.1f", level);
+                led_update_counter++;
+            }
+            else {
+                led_update_counter = 0;
+                parking_indicator.set_indicator_color(&red);
+                parking_indicator.write_indicator_level(100);
+//                ESP_LOGI("LED", "Updated LED to red, level: 100");
+            }
+        }
     }
 }
