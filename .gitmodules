@@ -1,0 +1,3 @@
+[submodule "external/ESP-NOW-Transport"]
+	path = external/ESP-NOW-Transport
+	url = https://github.com/abestat2/ESP-NOW-Transport.git

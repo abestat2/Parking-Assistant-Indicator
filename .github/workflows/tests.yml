@@ -30,6 +30,11 @@ jobs:
       - name: Keep checked-out files byte-for-byte
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v5
+        with:
+          # detection_link comes from the private ESP-NOW-Transport repo, which the workflow's own
+          # token cannot read; SUBMODULE_TOKEN is a fine-grained token with read access to both repos
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
       - name: Put Docker on PATH
         # Docker Desktop installs to Program Files (all users) or to the user's AppData (per user)
         run: |
@@ -63,7 +68,7 @@ jobs:
       - name: Build detection link on-target test app
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
-          bash -c "cp -a /project /work && cd /work/components/detection_link/test_apps/target && idf.py -B /tmp/build build"
+          bash -c "cp -a /project /work && cd /work/external/ESP-NOW-Transport/detection_link/test_apps/target && idf.py -B /tmp/build build"
 
   host-tests:
     name: Host tests (MB1013 + VL53L1X + detection link)
@@ -74,6 +79,11 @@ jobs:
       - name: Keep checked-out files byte-for-byte
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v5
+        with:
+          # detection_link comes from the private ESP-NOW-Transport repo, which the workflow's own
+          # token cannot read; SUBMODULE_TOKEN is a fine-grained token with read access to both repos
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
       - name: Put Docker on PATH
         # Docker Desktop installs to Program Files (all users) or to the user's AppData (per user)
         run: |
@@ -100,19 +110,19 @@ jobs:
       - name: Run MB1013 host tests
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" -v "${{ runner.temp }}/coverage:/out" $env:IDF_IMAGE
-          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh mb1013 /out"
+          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh components/mb1013 /out"
       - name: Run VL53L1X host tests
         # Always run, so a failure in an earlier component's tests does not hide these results
         if: ${{ !cancelled() }}
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" -v "${{ runner.temp }}/coverage:/out" $env:IDF_IMAGE
-          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh vl53l1x /out"
+          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh components/vl53l1x /out"
       - name: Run detection link host tests
         # Always run, so a failure in an earlier component's tests does not hide these results
         if: ${{ !cancelled() }}
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" -v "${{ runner.temp }}/coverage:/out" $env:IDF_IMAGE
-          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh detection_link /out"
+          bash -c "cp -a /project /work && bash /work/.github/scripts/host_tests_coverage.sh external/ESP-NOW-Transport/detection_link /out"
       - name: Coverage report
         if: ${{ !cancelled() }}
         run: |
@@ -173,6 +183,11 @@ jobs:
       - name: Keep checked-out files byte-for-byte
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v5
+        with:
+          # detection_link comes from the private ESP-NOW-Transport repo, which the workflow's own
+          # token cannot read; SUBMODULE_TOKEN is a fine-grained token with read access to both repos
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
       - name: Put Docker on PATH
         # Docker Desktop installs to Program Files (all users) or to the user's AppData (per user)
         run: |
@@ -202,7 +217,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: >
           docker run --rm -v "${{ github.workspace }}:/project:ro" $env:IDF_IMAGE
-          bash -c "cp -a /project /work && bash /work/components/detection_link/test_apps/target/run_qemu_tests.sh"
+          bash -c "cp -a /project /work && bash /work/external/ESP-NOW-Transport/detection_link/test_apps/target/run_qemu_tests.sh"
 
   hardware-tests:
     name: Hardware tests (ESP32-C3 on the runner)
@@ -215,5 +230,10 @@ jobs:
       - name: Keep checked-out files byte-for-byte
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v5
+        with:
+          # detection_link comes from the private ESP-NOW-Transport repo, which the workflow's own
+          # token cannot read; SUBMODULE_TOKEN is a fine-grained token with read access to both repos
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
       - name: Build, flash and run detection link tests on the board
-        run: ./components/detection_link/test_apps/target/run_hw_tests.ps1
+        run: ./external/ESP-NOW-Transport/detection_link/test_apps/target/run_hw_tests.ps1
