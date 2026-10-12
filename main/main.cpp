@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "driver/usb_serial_jtag.h"
 #include "esp_attr.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -15,28 +16,59 @@
 #include "detection_link/DetectionLink.hpp"
 #include "detection_link/EspNowTransport.hpp"
 #include "detection_link/ExchangeId.hpp"
+#include "GuidanceBar.hpp"
+#include "I2cBus.hpp"
 #include "ParkingIndicator.hpp"
 #include "RangeBench.hpp"
+#include "VL53L1X.hpp"
 
 using namespace detection_link;
 
 static const char* TAG = "INDICATOR";
 
+// Qwiic connector on the SparkFun Pro Micro ESP32-C3
+#define I2C_SDA_PIN GPIO_NUM_5
+#define I2C_SCL_PIN GPIO_NUM_6
+#define RANGE_DETECTOR_XSHUT_PIN GPIO_NUM_4
 // Data in of the Adafruit 2869 NeoPixel Stick (8 x SK6812 RGBW)
 #define LED_STRIP_PIN GPIO_NUM_3
 
-// Kept dim: each LED draws up to about 18 mA per channel at full brightness
-static constexpr uint8_t LED_LEVEL = 32;
-static constexpr LEDColor COLOR_PRESENT = {LED_LEVEL, 0, 0, 0};
-static constexpr LEDColor COLOR_ABSENT = {0, LED_LEVEL, 0, 0};
-static constexpr LEDColor COLOR_UNKNOWN = {LED_LEVEL, LED_LEVEL / 3, 0, 0};
-static constexpr LEDColor COLOR_NO_CONTACT = {0, 0, LED_LEVEL, 0};
-// One LED of the eight: the bar lights fully for any level below one LED's step
-static constexpr float NO_CONTACT_LEVEL = 12.5f;
+static constexpr uint8_t LED_COUNT = 8;
+static constexpr uint8_t LED_LEVEL = CONFIG_INDICATOR_LED_BRIGHTNESS;
+static constexpr LEDColor COLOR_APPROACH = {0, LED_LEVEL, 0, 0};
+static constexpr LEDColor COLOR_STOP = {LED_LEVEL, 0, 0, 0};
+
+static_assert(CONFIG_INDICATOR_STOP_DISTANCE_MM < CONFIG_INDICATOR_GUIDE_DISTANCE_MM,
+              "The stop distance must be closer than the distance where guidance starts");
 
 // Kept through deep sleep; cleared by a power-on or reset
 RTC_DATA_ATTR static uint32_t s_wake_count;
 RTC_DATA_ATTR static uint32_t s_failures_in_row;
+// The car now in the stall has been guided in, so it is not guided again until the stall empties
+RTC_DATA_ATTR static bool s_arrival_guided;
+
+// Off while a PC is connected to the USB port, so the indicator can be flashed and logged
+#if CONFIG_INDICATOR_DEEP_SLEEP
+static bool s_deep_sleep = true;
+#else
+static bool s_deep_sleep = false;
+#endif
+
+// How long a cold boot waits for a USB host before deciding to deep sleep
+static constexpr int64_t USB_HOST_WAIT_MS = 2000;
+
+// True if a PC (not a charger or power bank) enumerates the USB port within USB_HOST_WAIT_MS
+static bool usb_host_connected()
+{
+    const int64_t start_ms = esp_timer_get_time() / 1000;
+    while (esp_timer_get_time() / 1000 - start_ms < USB_HOST_WAIT_MS) {
+        if (usb_serial_jtag_is_connected()) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return false;
+}
 
 // Parse "aa:bb:cc:dd:ee:ff". Returns false for an empty or malformed address.
 static bool parse_mac(const char* text, MacAddress& mac)
@@ -87,8 +119,8 @@ static ExchangeResult run_exchange(DetectionLink& link)
 {
     const int64_t start_us = esp_timer_get_time();
     ExchangeResult result = {false, ItemState::Unknown, FailureReason::None, 0};
-    if (link.request_status() != ESP_OK) {
-        result.reason = FailureReason::TransportFailure;
+    if (!link.started() || link.request_status() != ESP_OK) {
+        result.reason = link.started() ? FailureReason::TransportFailure : FailureReason::InitializationFailure;
         return result;
     }
     bool done = false;
@@ -113,31 +145,128 @@ static ExchangeResult run_exchange(DetectionLink& link)
     return result;
 }
 
-static void show(ParkingIndicator& bar, const ExchangeResult& result)
+static void log_result(const ExchangeResult& result)
 {
-    LEDColor color;
-    float level = 100.0f;
     if (result.complete) {
-        switch (result.state) {
-        case ItemState::Present: color = COLOR_PRESENT; break;
-        case ItemState::Absent: color = COLOR_ABSENT; break;
-        default: color = COLOR_UNKNOWN; break;
-        }
-    } else if (s_failures_in_row >= CONFIG_INDICATOR_FAILURES_BEFORE_NO_CONTACT) {
-        color = COLOR_NO_CONTACT;
-        level = NO_CONTACT_LEVEL;
+        s_failures_in_row = 0;
+        ESP_LOGI(TAG, "Wake %" PRIu32 ": stall %s (%" PRId64 " ms)", s_wake_count, to_string(result.state),
+                 result.elapsed_ms);
     } else {
-        // A missed exchange or two keeps showing the last state until the retry
-        return;
+        ++s_failures_in_row;
+        ESP_LOGW(TAG, "Wake %" PRIu32 ": exchange failed: %s (%" PRId64 " ms, %" PRIu32 " in a row)", s_wake_count,
+                 to_string(result.reason), result.elapsed_ms, s_failures_in_row);
     }
-    bar.set_indicator_color(&color);
-    bar.write_indicator_level(level);
 }
 
-#if CONFIG_INDICATOR_DEEP_SLEEP
+// Show one lidar reading. Readings that are not a distance leave the bar as it is, except
+// "out of range", which means nothing is within the sensor's reach yet.
+static void show_distance(ParkingIndicator& bar, int32_t range_mm)
+{
+    if (range_mm == vl53l1x::RANGE_OUT_OF_RANGE) {
+        range_mm = CONFIG_INDICATOR_GUIDE_DISTANCE_MM;
+    } else if (range_mm < 0) {
+        return;
+    }
+    const GuidanceBar setting = guidance_bar(range_mm, CONFIG_INDICATOR_STOP_DISTANCE_MM,
+                                             CONFIG_INDICATOR_GUIDE_DISTANCE_MM, LED_COUNT);
+    LEDColor color = setting.too_close ? COLOR_STOP : COLOR_APPROACH;
+    bar.set_indicator_color(&color);
+    bar.write_indicator_level(setting.lit * 100.0f / LED_COUNT);
+}
+
+/**
+ * @brief A car has arrived: show its distance on the bar for the guidance time
+ *
+ * Asks the detector again every request interval and stops early once the stall is empty, so a car
+ * that backs out does not leave the bar lit.
+ *
+ * @return ItemState Absent if the stall emptied during guidance, otherwise Present
+ */
+static ItemState guide_car(DetectionLink& link, ParkingIndicator& bar)
+{
+    // The board and the Adafruit breakout both have I2C pull-ups, so the internal ones stay off
+    static I2cBus i2c_bus(I2C_NUM_0, I2C_SDA_PIN, I2C_SCL_PIN);
+    static I2cMasterDevice range_device(i2c_bus, vl53l1x::DEFAULT_ADDRESS);
+    static VL53L1X lidar(range_device, RANGE_DETECTOR_XSHUT_PIN);
+    static bool bus_ready = false;
+    if (!bus_ready) {
+        bus_ready = i2c_bus.init() == ESP_OK && range_device.init() == ESP_OK;
+    }
+
+    vl53l1x::Config config;
+    config.distance_mode = vl53l1x::DistanceMode::Long;
+    config.timing_budget_ms = 50;
+    config.inter_measurement_ms = 100;
+    esp_err_t err = !bus_ready ? ESP_FAIL : (lidar.is_initialized() ? lidar.wake() : lidar.init(config));
+    if (err == ESP_OK) {
+        err = lidar.start_ranging();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Lidar not available (%s); no distance to show", esp_err_to_name(err));
+    }
+
+    ESP_LOGI(TAG, "Car arriving: guiding for %d s", CONFIG_INDICATOR_GUIDANCE_TIME_MS / 1000);
+    const int64_t start_ms = esp_timer_get_time() / 1000;
+    int64_t next_check_ms = start_ms + CONFIG_INDICATOR_REQUEST_INTERVAL_MS;
+    ItemState state = ItemState::Present;
+    int32_t last_logged_mm = -1000;
+    while (esp_timer_get_time() / 1000 - start_ms < CONFIG_INDICATOR_GUIDANCE_TIME_MS) {
+        if (lidar.is_ranging()) {
+            const int32_t range_mm = lidar.read_range_mm(200);
+            show_distance(bar, range_mm);
+            // Log only noticeable changes, so the log follows the car without flooding
+            if (range_mm < 0 || range_mm - last_logged_mm > 50 || last_logged_mm - range_mm > 50) {
+                ESP_LOGI(TAG, "Distance %" PRId32 " mm", range_mm);
+                last_logged_mm = range_mm;
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        if (esp_timer_get_time() / 1000 >= next_check_ms) {
+            next_check_ms += CONFIG_INDICATOR_REQUEST_INTERVAL_MS;
+            ++s_wake_count;
+            const ExchangeResult result = run_exchange(link);
+            log_result(result);
+            if (result.complete && result.state == ItemState::Absent) {
+                ESP_LOGI(TAG, "Stall empty again; stopping guidance");
+                state = ItemState::Absent;
+                break;
+            }
+        }
+    }
+
+    bar.clear_indicator();
+    if (lidar.is_initialized()) {
+        if (s_deep_sleep) {
+            lidar.prepare_for_deep_sleep();
+        } else {
+            lidar.stop_ranging();
+        }
+    }
+    ESP_LOGI(TAG, "Guidance done");
+    return state;
+}
+
+// One request to the detector, and guidance if a new car has arrived
+static void serve(DetectionLink& link, ParkingIndicator& bar)
+{
+    const ExchangeResult result = run_exchange(link);
+    log_result(result);
+    if (!result.complete) {
+        return;
+    }
+    if (result.state == ItemState::Absent) {
+        s_arrival_guided = false;
+    } else if (result.state == ItemState::Present && !s_arrival_guided) {
+        s_arrival_guided = guide_car(link, bar) == ItemState::Present;
+    }
+    // Unknown (the radar is not ready) changes nothing: the bar stays off and a car being guided stays guided
+}
+
 [[noreturn]] static void sleep_until_next_request(uint32_t delay_ms)
 {
-    // The LEDs keep their colour while powered; hold the data line low so they see no glitches
+    // The LEDs keep their state while powered; hold the data line low so they see no glitches
     gpio_set_direction(LED_STRIP_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(LED_STRIP_PIN, 0);
     gpio_hold_en(LED_STRIP_PIN);
@@ -146,7 +275,6 @@ static void show(ParkingIndicator& bar, const ExchangeResult& result)
     esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(delay_ms) * 1000);
     esp_deep_sleep_start();
 }
-#endif
 
 extern "C" void app_main(void)
 {
@@ -159,10 +287,14 @@ extern "C" void app_main(void)
     ++s_wake_count;
     if (!woke_from_sleep) {
         s_failures_in_row = 0;
+        s_arrival_guided = false;
     }
 
     static ParkingIndicator bar(LED_STRIP_PIN);
     bar.enable_indicator();
+    if (!woke_from_sleep) {
+        bar.clear_indicator();
+    }
 
     start_wifi(CONFIG_INDICATOR_ESPNOW_CHANNEL);
     if (!woke_from_sleep) {
@@ -172,6 +304,10 @@ extern "C" void app_main(void)
                  MAC2STR(own_mac), CONFIG_INDICATOR_ESPNOW_CHANNEL);
         // A brownout, watchdog or panic here means the previous run ended badly
         ESP_LOGI(TAG, "Started by reset reason %d", static_cast<int>(esp_reset_reason()));
+        if (s_deep_sleep && usb_host_connected()) {
+            s_deep_sleep = false;
+            ESP_LOGI(TAG, "USB host connected: staying awake between requests until the next power-up");
+        }
     }
 
     LinkConfig config;
@@ -181,8 +317,6 @@ extern "C" void app_main(void)
     if (!parse_mac(CONFIG_INDICATOR_DETECTOR_MAC, detector)) {
         ESP_LOGE(TAG, "No detector MAC address configured (\"%s\"); set it in menuconfig",
                  CONFIG_INDICATOR_DETECTOR_MAC);
-        s_failures_in_row = CONFIG_INDICATOR_FAILURES_BEFORE_NO_CONTACT;
-        show(bar, {false, ItemState::Unknown, FailureReason::InitializationFailure, 0});
         while (true) {
             vTaskDelay(portMAX_DELAY);
         }
@@ -193,30 +327,15 @@ extern "C" void app_main(void)
     static DetectionLink link(transport);
 
     while (true) {
-        ExchangeResult result = {false, ItemState::Unknown, FailureReason::InitializationFailure, 0};
-        if (link.started() || link.begin(Role::Receiver, config) == ESP_OK) {
-            result = run_exchange(link);
+        if (!link.started()) {
+            link.begin(Role::Receiver, config);
         }
-
-        if (result.complete) {
-            s_failures_in_row = 0;
-            ESP_LOGI(TAG, "Wake %" PRIu32 ": stall %s (%" PRId64 " ms)", s_wake_count, to_string(result.state),
-                     result.elapsed_ms);
-        } else {
-            ++s_failures_in_row;
-            ESP_LOGW(TAG, "Wake %" PRIu32 ": exchange failed: %s (%" PRId64 " ms, %" PRIu32 " in a row)",
-                     s_wake_count, to_string(result.reason), result.elapsed_ms, s_failures_in_row);
+        serve(link, bar);
+        if (s_deep_sleep) {
+            link.end();
+            sleep_until_next_request(CONFIG_INDICATOR_REQUEST_INTERVAL_MS);
         }
-        show(bar, result);
-
-        const uint32_t delay_ms =
-            result.complete ? CONFIG_INDICATOR_REQUEST_INTERVAL_MS : CONFIG_INDICATOR_RETRY_INTERVAL_MS;
-#if CONFIG_INDICATOR_DEEP_SLEEP
-        link.end();
-        sleep_until_next_request(delay_ms);
-#else
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_INDICATOR_REQUEST_INTERVAL_MS));
         ++s_wake_count;
-#endif
     }
 }
