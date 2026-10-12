@@ -78,6 +78,8 @@ esp_err_t ParkingIndicator::write_indicator_level(float level) {
 
 ParkingIndicator::~ParkingIndicator() {
     if (led_strip_) {
-        // Add code to delete the LED strip device members
+        // Releases the RMT channel; the data pin keeps its last (idle, low) level until reconfigured
+        led_strip_del(led_strip_);
+        led_strip_ = nullptr;
     }
 }

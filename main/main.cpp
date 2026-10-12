@@ -1,9 +1,13 @@
 #include <cinttypes>
 #include <cstdio>
+#include <optional>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/usb_serial_jtag.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
 #include "esp_attr.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -32,6 +36,10 @@ static const char* TAG = "INDICATOR";
 #define RANGE_DETECTOR_XSHUT_PIN GPIO_NUM_4
 // Data in of the Adafruit 2869 NeoPixel Stick (8 x SK6812 RGBW)
 #define LED_STRIP_PIN GPIO_NUM_3
+// Gate of the N-channel FET in the LED bar's ground: high powers the bar
+#define LED_POWER_PIN static_cast<gpio_num_t>(CONFIG_INDICATOR_LED_POWER_GPIO)
+// Battery through a resistor divider
+#define BATTERY_ADC_PIN CONFIG_INDICATOR_BATTERY_ADC_GPIO
 
 static constexpr uint8_t LED_COUNT = 8;
 static constexpr uint8_t LED_LEVEL = CONFIG_INDICATOR_LED_BRIGHTNESS;
@@ -40,6 +48,9 @@ static constexpr LEDColor COLOR_STOP = {LED_LEVEL, 0, 0, 0};
 
 static_assert(CONFIG_INDICATOR_STOP_DISTANCE_MM < CONFIG_INDICATOR_GUIDE_DISTANCE_MM,
               "The stop distance must be closer than the distance where guidance starts");
+
+// Battery voltage measured this wake, sent with every request; BATTERY_UNKNOWN if not measured
+static uint16_t s_battery_mv = BATTERY_UNKNOWN;
 
 // Kept through deep sleep; cleared by a power-on or reset
 RTC_DATA_ATTR static uint32_t s_wake_count;
@@ -106,6 +117,81 @@ static void start_wifi(uint8_t channel)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 }
 
+/**
+ * @brief Measure the battery through the divider on the battery ADC pin
+ * @return uint16_t Battery voltage in millivolts, or BATTERY_UNKNOWN if the ADC is not available
+ */
+static uint16_t read_battery_mv()
+{
+    adc_unit_t unit;
+    adc_channel_t channel;
+    if (adc_oneshot_io_to_channel(BATTERY_ADC_PIN, &unit, &channel) != ESP_OK) {
+        return BATTERY_UNKNOWN;
+    }
+    adc_oneshot_unit_handle_t adc = nullptr;
+    adc_oneshot_unit_init_cfg_t unit_config = {};
+    unit_config.unit_id = unit;
+    if (adc_oneshot_new_unit(&unit_config, &adc) != ESP_OK) {
+        return BATTERY_UNKNOWN;
+    }
+    // 12 dB covers about 0-2.5 V at the pin, a full cell (4.2 V) behind a 1:2 divider
+    adc_oneshot_chan_cfg_t channel_config = {};
+    channel_config.atten = ADC_ATTEN_DB_12;
+    channel_config.bitwidth = ADC_BITWIDTH_DEFAULT;
+    adc_cali_handle_t cali = nullptr;
+    adc_cali_curve_fitting_config_t cali_config = {};
+    cali_config.unit_id = unit;
+    cali_config.chan = channel;
+    cali_config.atten = ADC_ATTEN_DB_12;
+    cali_config.bitwidth = ADC_BITWIDTH_DEFAULT;
+
+    uint16_t battery_mv = BATTERY_UNKNOWN;
+    if (adc_oneshot_config_channel(adc, channel, &channel_config) == ESP_OK &&
+        adc_cali_create_scheme_curve_fitting(&cali_config, &cali) == ESP_OK) {
+        // Average a few samples; the capacitor on the pin keeps the divider's high impedance from loading them
+        constexpr int SAMPLES = 8;
+        int total_mv = 0;
+        int samples = 0;
+        for (int i = 0; i < SAMPLES; ++i) {
+            int raw;
+            int mv;
+            if (adc_oneshot_read(adc, channel, &raw) == ESP_OK &&
+                adc_cali_raw_to_voltage(cali, raw, &mv) == ESP_OK) {
+                total_mv += mv;
+                ++samples;
+            }
+        }
+        if (samples > 0) {
+            const int pin_mv = total_mv / samples;
+            battery_mv = static_cast<uint16_t>(pin_mv * (CONFIG_INDICATOR_BATTERY_DIVIDER_TOP_KOHM +
+                                                         CONFIG_INDICATOR_BATTERY_DIVIDER_BOTTOM_KOHM) /
+                                               CONFIG_INDICATOR_BATTERY_DIVIDER_BOTTOM_KOHM);
+        }
+        adc_cali_delete_scheme_curve_fitting(cali);
+    }
+    adc_oneshot_del_unit(adc);
+    return battery_mv;
+}
+
+// The LED data pin while the bar is unpowered: not driven and not pulled, so the LEDs, whose ground
+// is switched off, cannot find a ground path through it
+static void float_led_data_pin()
+{
+    gpio_reset_pin(LED_STRIP_PIN);
+    gpio_set_direction(LED_STRIP_PIN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(LED_STRIP_PIN, GPIO_FLOATING);
+}
+
+static void set_led_power(bool on)
+{
+    gpio_set_direction(LED_POWER_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(LED_POWER_PIN, on ? 1 : 0);
+    if (on) {
+        // Let the LEDs power up before the first frame
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+}
+
 struct ExchangeResult {
     bool complete;
     ItemState state;
@@ -119,7 +205,7 @@ static ExchangeResult run_exchange(DetectionLink& link)
 {
     const int64_t start_us = esp_timer_get_time();
     ExchangeResult result = {false, ItemState::Unknown, FailureReason::None, 0};
-    if (!link.started() || link.request_status() != ESP_OK) {
+    if (!link.started() || link.request_status(s_battery_mv) != ESP_OK) {
         result.reason = link.started() ? FailureReason::TransportFailure : FailureReason::InitializationFailure;
         return result;
     }
@@ -149,8 +235,8 @@ static void log_result(const ExchangeResult& result)
 {
     if (result.complete) {
         s_failures_in_row = 0;
-        ESP_LOGI(TAG, "Wake %" PRIu32 ": stall %s (%" PRId64 " ms)", s_wake_count, to_string(result.state),
-                 result.elapsed_ms);
+        ESP_LOGI(TAG, "Wake %" PRIu32 ": stall %s (%" PRId64 " ms, battery %u mV)", s_wake_count,
+                 to_string(result.state), result.elapsed_ms, static_cast<unsigned>(s_battery_mv));
     } else {
         ++s_failures_in_row;
         ESP_LOGW(TAG, "Wake %" PRIu32 ": exchange failed: %s (%" PRId64 " ms, %" PRIu32 " in a row)", s_wake_count,
@@ -182,8 +268,16 @@ static void show_distance(ParkingIndicator& bar, int32_t range_mm)
  *
  * @return ItemState Absent if the stall emptied during guidance, otherwise Present
  */
-static ItemState guide_car(DetectionLink& link, ParkingIndicator& bar)
+static ItemState guide_car(DetectionLink& link)
 {
+    // The bar is powered and driven only while guiding
+    set_led_power(true);
+    std::optional<ParkingIndicator> led_bar;
+    led_bar.emplace(LED_STRIP_PIN);
+    ParkingIndicator& bar = *led_bar;
+    bar.enable_indicator();
+    bar.clear_indicator();
+
     // The board and the Adafruit breakout both have I2C pull-ups, so the internal ones stay off
     static I2cBus i2c_bus(I2C_NUM_0, I2C_SDA_PIN, I2C_SCL_PIN);
     static I2cMasterDevice range_device(i2c_bus, vl53l1x::DEFAULT_ADDRESS);
@@ -237,6 +331,9 @@ static ItemState guide_car(DetectionLink& link, ParkingIndicator& bar)
     }
 
     bar.clear_indicator();
+    led_bar.reset();
+    float_led_data_pin();
+    set_led_power(false);
     if (lidar.is_initialized()) {
         if (s_deep_sleep) {
             lidar.prepare_for_deep_sleep();
@@ -249,7 +346,7 @@ static ItemState guide_car(DetectionLink& link, ParkingIndicator& bar)
 }
 
 // One request to the detector, and guidance if a new car has arrived
-static void serve(DetectionLink& link, ParkingIndicator& bar)
+static void serve(DetectionLink& link)
 {
     const ExchangeResult result = run_exchange(link);
     log_result(result);
@@ -259,17 +356,16 @@ static void serve(DetectionLink& link, ParkingIndicator& bar)
     if (result.state == ItemState::Absent) {
         s_arrival_guided = false;
     } else if (result.state == ItemState::Present && !s_arrival_guided) {
-        s_arrival_guided = guide_car(link, bar) == ItemState::Present;
+        s_arrival_guided = guide_car(link) == ItemState::Present;
     }
     // Unknown (the radar is not ready) changes nothing: the bar stays off and a car being guided stays guided
 }
 
 [[noreturn]] static void sleep_until_next_request(uint32_t delay_ms)
 {
-    // The LEDs keep their state while powered; hold the data line low so they see no glitches
-    gpio_set_direction(LED_STRIP_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(LED_STRIP_PIN, 0);
-    gpio_hold_en(LED_STRIP_PIN);
+    // Keep the bar unpowered through sleep; its data pin stays floating
+    set_led_power(false);
+    gpio_hold_en(LED_POWER_PIN);
     gpio_deep_sleep_hold_en();
     esp_wifi_stop();
     esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(delay_ms) * 1000);
@@ -281,19 +377,18 @@ extern "C" void app_main(void)
 #if CONFIG_INDICATOR_RANGE_BENCH
     run_range_bench();
 #endif
-    // Released before the LED driver takes the line back
+    // Bar off and its data pin floating until a car needs guiding
+    gpio_hold_dis(LED_POWER_PIN);
     gpio_hold_dis(LED_STRIP_PIN);
+    set_led_power(false);
+    float_led_data_pin();
+    // Measured before Wi-Fi starts, so the radio's current does not pull the reading down
+    s_battery_mv = read_battery_mv();
     const bool woke_from_sleep = esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_TIMER);
     ++s_wake_count;
     if (!woke_from_sleep) {
         s_failures_in_row = 0;
         s_arrival_guided = false;
-    }
-
-    static ParkingIndicator bar(LED_STRIP_PIN);
-    bar.enable_indicator();
-    if (!woke_from_sleep) {
-        bar.clear_indicator();
     }
 
     start_wifi(CONFIG_INDICATOR_ESPNOW_CHANNEL);
@@ -330,12 +425,13 @@ extern "C" void app_main(void)
         if (!link.started()) {
             link.begin(Role::Receiver, config);
         }
-        serve(link, bar);
+        serve(link);
         if (s_deep_sleep) {
             link.end();
             sleep_until_next_request(CONFIG_INDICATOR_REQUEST_INTERVAL_MS);
         }
         vTaskDelay(pdMS_TO_TICKS(CONFIG_INDICATOR_REQUEST_INTERVAL_MS));
         ++s_wake_count;
+        s_battery_mv = read_battery_mv();
     }
 }

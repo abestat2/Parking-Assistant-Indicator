@@ -47,12 +47,38 @@ menu "Parking Assistant Indicator"
                 One green LED at this distance; closer than this the whole bar is red. Must be
                 less than the distance where the whole bar is lit.
 
+        config INDICATOR_LED_POWER_GPIO
+            int "LED bar power switch GPIO"
+            default 1
+            help
+                Drives the gate of the N-channel FET that switches the LED bar's ground: high
+                powers the bar. It is held low through deep sleep.
+
         config INDICATOR_LED_BRIGHTNESS
             int "LED brightness (0-255)"
             range 1 255
             default 64
             help
                 Each LED draws up to about 18 mA per colour at 255.
+
+    endmenu
+
+    menu "Battery"
+
+        config INDICATOR_BATTERY_ADC_GPIO
+            int "Battery divider ADC GPIO"
+            default 0
+            help
+                ADC1 pin at the middle of the resistor divider from the battery. The voltage is
+                sent to the detector with every request.
+
+        config INDICATOR_BATTERY_DIVIDER_TOP_KOHM
+            int "Divider resistor from the battery to the pin (kOhm)"
+            default 470
+
+        config INDICATOR_BATTERY_DIVIDER_BOTTOM_KOHM
+            int "Divider resistor from the pin to ground (kOhm)"
+            default 470
 
     endmenu
 

@@ -6,6 +6,7 @@ idf_component_register(
         vl53l1x
         mb1013
         detection_link
+        esp_adc
         esp_driver_gpio
         esp_driver_usb_serial_jtag
         esp_event
