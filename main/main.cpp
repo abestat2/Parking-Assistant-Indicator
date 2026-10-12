@@ -7,6 +7,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_system.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -169,6 +170,8 @@ extern "C" void app_main(void)
         ESP_ERROR_CHECK(esp_read_mac(own_mac, ESP_MAC_WIFI_STA));
         ESP_LOGI(TAG, "Indicator MAC " MACSTR " on channel %d; set this as a stall's indicator on the detector",
                  MAC2STR(own_mac), CONFIG_INDICATOR_ESPNOW_CHANNEL);
+        // A brownout, watchdog or panic here means the previous run ended badly
+        ESP_LOGI(TAG, "Started by reset reason %d", static_cast<int>(esp_reset_reason()));
     }
 
     LinkConfig config;
