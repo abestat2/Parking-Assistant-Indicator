@@ -1,0 +1,50 @@
+menu "Parking Assistant Indicator"
+
+    config INDICATOR_DETECTOR_MAC
+        string "Detector MAC address"
+        default ""
+        help
+            Station MAC address of the detector, as aa:bb:cc:dd:ee:ff. The detector logs it at
+            startup. The detector decides which stall this indicator shows from this indicator's
+            own MAC address, so every indicator runs the same firmware.
+
+    config INDICATOR_ESPNOW_CHANNEL
+        int "ESP-NOW Wi-Fi channel"
+        range 1 13
+        default 1
+        help
+            Wi-Fi channel the detector and every indicator use. It must match the detector.
+
+    config INDICATOR_REQUEST_INTERVAL_MS
+        int "Time between requests (ms)"
+        default 60000
+        help
+            How long to wait after a successful exchange before asking again. Keep it below the
+            detector's expected contact interval, or the detector reports this indicator overdue.
+
+    config INDICATOR_RETRY_INTERVAL_MS
+        int "Time before retrying after a failed exchange (ms)"
+        default 5000
+
+    config INDICATOR_FAILURES_BEFORE_NO_CONTACT
+        int "Failed exchanges in a row before showing no contact"
+        default 3
+        range 1 100
+        help
+            Until then the bar keeps showing the last state the detector reported.
+
+    config INDICATOR_DEEP_SLEEP
+        bool "Deep sleep between requests"
+        default y
+        help
+            Sleep between requests to save power. Turn off for bench testing: the chip then stays
+            awake, so its USB serial console stays connected, and the link stays started.
+
+    config INDICATOR_RANGE_BENCH
+        bool "Run the range sensor bench test instead"
+        default n
+        help
+            Log the lidar and sonar ranges and step the LED bar through its levels, instead of
+            showing the stall state from the detector.
+
+endmenu
