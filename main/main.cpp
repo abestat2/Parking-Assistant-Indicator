@@ -42,6 +42,7 @@ static const char* TAG = "INDICATOR";
 #define BATTERY_ADC_PIN CONFIG_INDICATOR_BATTERY_ADC_GPIO
 
 static constexpr uint8_t LED_COUNT = 8;
+static constexpr int LIDAR_DISCARDED_READINGS = 2;
 static constexpr uint8_t LED_LEVEL = CONFIG_INDICATOR_LED_BRIGHTNESS;
 static constexpr LEDColor COLOR_APPROACH = {0, LED_LEVEL, 0, 0};
 static constexpr LEDColor COLOR_STOP = {LED_LEVEL, 0, 0, 0};
@@ -294,6 +295,13 @@ static ItemState guide_car(DetectionLink& link)
     esp_err_t err = !bus_ready ? ESP_FAIL : (lidar.is_initialized() ? lidar.wake() : lidar.init(config));
     if (err == ESP_OK) {
         err = lidar.start_ranging();
+    }
+    if (err == ESP_OK) {
+        // The first readings after starting are not reliable (31 and 92 mm seen with nothing that
+        // close) and would flash the bar red, so they are not shown
+        for (int i = 0; i < LIDAR_DISCARDED_READINGS; ++i) {
+            lidar.read_range_mm(200);
+        }
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Lidar not available (%s); no distance to show", esp_err_to_name(err));
