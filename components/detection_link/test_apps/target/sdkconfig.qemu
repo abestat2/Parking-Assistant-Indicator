@@ -1,2 +1,0 @@
-# Layered on sdkconfig.defaults by run_qemu_tests.ps1 / run_qemu_tests.sh
-CONFIG_DETECTION_LINK_TEST_QEMU=y
