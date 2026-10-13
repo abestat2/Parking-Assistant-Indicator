@@ -1,0 +1,100 @@
+menu "Parking Assistant Indicator"
+
+    config INDICATOR_DETECTOR_MAC
+        string "Detector MAC address"
+        default ""
+        help
+            Station MAC address of the detector, as aa:bb:cc:dd:ee:ff. The detector logs it at
+            startup. The detector decides which stall this indicator shows from this indicator's
+            own MAC address, so every indicator runs the same firmware.
+
+    config INDICATOR_ESPNOW_CHANNEL
+        int "ESP-NOW Wi-Fi channel"
+        range 1 13
+        default 1
+        help
+            Wi-Fi channel the detector and every indicator use. It must match the detector.
+
+    config INDICATOR_REQUEST_INTERVAL_MS
+        int "Time between requests (ms)"
+        default 3000
+        help
+            How often the indicator wakes and asks the detector whether a car is in its stall.
+            This is the longest a car waits before the bar lights. Keep it below the detector's
+            expected contact interval, or the detector reports this indicator overdue.
+
+    menu "Parking guidance"
+
+        config INDICATOR_GUIDANCE_TIME_MS
+            int "How long to show the distance after a car arrives (ms)"
+            default 60000
+            help
+                When the detector first reports a car, the indicator stays awake this long showing
+                the lidar distance on the LED bar, then turns the bar off. It does not guide again
+                until the detector has reported the stall empty.
+
+        config INDICATOR_GUIDE_DISTANCE_MM
+            int "Distance where the whole bar is lit (mm)"
+            default 2000
+            help
+                At this distance or farther the whole bar is green. Closer, the bar shrinks
+                linearly to one LED at the stop distance.
+
+        config INDICATOR_STOP_DISTANCE_MM
+            int "Stop distance (mm)"
+            default 300
+            help
+                One green LED at this distance; closer than this the whole bar is red. Must be
+                less than the distance where the whole bar is lit.
+
+        config INDICATOR_LED_POWER_GPIO
+            int "LED bar power switch GPIO"
+            default 1
+            help
+                Drives the gate of the N-channel FET that switches the LED bar's ground: high
+                powers the bar. It is held low through deep sleep.
+
+        config INDICATOR_LED_BRIGHTNESS
+            int "LED brightness (0-255)"
+            range 1 255
+            default 64
+            help
+                Each LED draws up to about 18 mA per colour at 255.
+
+    endmenu
+
+    menu "Battery"
+
+        config INDICATOR_BATTERY_ADC_GPIO
+            int "Battery divider ADC GPIO"
+            default 0
+            help
+                ADC1 pin at the middle of the resistor divider from the battery. The voltage is
+                sent to the detector with every request.
+
+        config INDICATOR_BATTERY_DIVIDER_TOP_KOHM
+            int "Divider resistor from the battery to the pin (kOhm)"
+            default 470
+
+        config INDICATOR_BATTERY_DIVIDER_BOTTOM_KOHM
+            int "Divider resistor from the pin to ground (kOhm)"
+            default 470
+
+    endmenu
+
+    config INDICATOR_DEEP_SLEEP
+        bool "Deep sleep between requests"
+        default y
+        help
+            Sleep between requests to save power. If a PC enumerates the USB port within 2 s of
+            power-up, the indicator stays awake anyway until it is next powered up, so it can be
+            flashed and its log read. Turn off to stay awake always.
+
+    config INDICATOR_RANGE_BENCH
+        bool "Run the range sensor bench test instead"
+        default n
+        help
+            Log the lidar and sonar ranges and step the LED bar through its levels, instead of
+            guiding cars in.
+
+endmenu
