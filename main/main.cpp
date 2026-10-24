@@ -20,6 +20,7 @@
 #include "detection_link/DetectionLink.hpp"
 #include "detection_link/EspNowTransport.hpp"
 #include "detection_link/ExchangeId.hpp"
+#include "DistanceLimits.hpp"
 #include "GuidanceBar.hpp"
 #include "I2cBus.hpp"
 #include "ParkingIndicator.hpp"
@@ -52,6 +53,9 @@ static_assert(CONFIG_INDICATOR_STOP_DISTANCE_MM < CONFIG_INDICATOR_GUIDE_DISTANC
 
 // Battery voltage measured this wake, sent with every request; BATTERY_UNKNOWN if not measured
 static uint16_t s_battery_mv = BATTERY_UNKNOWN;
+
+// Stop and guide distances of the LED bar: saved in flash, set by the detector, loaded at start-up
+static RangeLimits s_limits = {CONFIG_INDICATOR_STOP_DISTANCE_MM, CONFIG_INDICATOR_GUIDE_DISTANCE_MM};
 
 // Kept through deep sleep; cleared by a power-on or reset
 RTC_DATA_ATTR static uint32_t s_wake_count;
@@ -200,13 +204,32 @@ struct ExchangeResult {
     int64_t elapsed_ms;
 };
 
+// Use the limits the detector asked for, and keep them through power loss. Ignored when they are not
+// set (no change asked for), the same as now, or not usable.
+static void apply_limits(const RangeLimits& requested)
+{
+    if (!requested.set() || requested == s_limits) {
+        return;
+    }
+    const esp_err_t err = distance_limits::save(requested);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Ignoring distance limits %u to %u mm: %s", static_cast<unsigned>(requested.min_mm),
+                 static_cast<unsigned>(requested.max_mm),
+                 err == ESP_ERR_INVALID_ARG ? "out of range" : esp_err_to_name(err));
+        return;
+    }
+    s_limits = requested;
+    ESP_LOGI(TAG, "Distance limits set by the detector: stop %u mm, full bar %u mm",
+             static_cast<unsigned>(s_limits.min_mm), static_cast<unsigned>(s_limits.max_mm));
+}
+
 // Run one request/response/acknowledge exchange with the detector. Bounded by the link's
 // exchange deadline, so this always returns.
 static ExchangeResult run_exchange(DetectionLink& link)
 {
     const int64_t start_us = esp_timer_get_time();
     ExchangeResult result = {false, ItemState::Unknown, FailureReason::None, 0};
-    if (!link.started() || link.request_status(s_battery_mv) != ESP_OK) {
+    if (!link.started() || link.request_status(s_battery_mv, s_limits) != ESP_OK) {
         result.reason = link.started() ? FailureReason::TransportFailure : FailureReason::InitializationFailure;
         return result;
     }
@@ -218,6 +241,7 @@ static ExchangeResult run_exchange(DetectionLink& link)
             if (event.type == LinkEventType::ExchangeComplete) {
                 result.complete = true;
                 result.state = event.item_state;
+                apply_limits(event.limits);
                 done = true;
             } else if (event.type == LinkEventType::ExchangeFailed) {
                 result.reason = event.reason;
@@ -250,12 +274,11 @@ static void log_result(const ExchangeResult& result)
 static void show_distance(ParkingIndicator& bar, int32_t range_mm)
 {
     if (range_mm == vl53l1x::RANGE_OUT_OF_RANGE) {
-        range_mm = CONFIG_INDICATOR_GUIDE_DISTANCE_MM;
+        range_mm = s_limits.max_mm;
     } else if (range_mm < 0) {
         return;
     }
-    const GuidanceBar setting = guidance_bar(range_mm, CONFIG_INDICATOR_STOP_DISTANCE_MM,
-                                             CONFIG_INDICATOR_GUIDE_DISTANCE_MM, LED_COUNT);
+    const GuidanceBar setting = guidance_bar(range_mm, s_limits.min_mm, s_limits.max_mm, LED_COUNT);
     LEDColor color = setting.too_close ? COLOR_STOP : COLOR_APPROACH;
     bar.set_indicator_color(&color);
     bar.write_indicator_level(setting.lit * 100.0f / LED_COUNT);
@@ -399,7 +422,8 @@ extern "C" void app_main(void)
         s_arrival_guided = false;
     }
 
-    start_wifi(CONFIG_INDICATOR_ESPNOW_CHANNEL);
+    start_wifi(CONFIG_INDICATOR_ESPNOW_CHANNEL);  // also initialises NVS
+    s_limits = distance_limits::load();
     if (!woke_from_sleep) {
         uint8_t own_mac[6];
         ESP_ERROR_CHECK(esp_read_mac(own_mac, ESP_MAC_WIFI_STA));
@@ -407,6 +431,8 @@ extern "C" void app_main(void)
                  MAC2STR(own_mac), CONFIG_INDICATOR_ESPNOW_CHANNEL);
         // A brownout, watchdog or panic here means the previous run ended badly
         ESP_LOGI(TAG, "Started by reset reason %d", static_cast<int>(esp_reset_reason()));
+        ESP_LOGI(TAG, "Distance limits: stop %u mm, full bar %u mm", static_cast<unsigned>(s_limits.min_mm),
+                 static_cast<unsigned>(s_limits.max_mm));
         if (s_deep_sleep && usb_host_connected()) {
             s_deep_sleep = false;
             ESP_LOGI(TAG, "USB host connected: staying awake between requests until the next power-up");
