@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 #include <optional>
@@ -54,6 +55,9 @@ static_assert(CONFIG_INDICATOR_STOP_DISTANCE_MM < CONFIG_INDICATOR_GUIDE_DISTANC
 // Battery voltage measured this wake, sent with every request; BATTERY_UNKNOWN if not measured
 static uint16_t s_battery_mv = BATTERY_UNKNOWN;
 
+// What the lidar last measured, sent to the detector with each request. The lidar is only on while
+// guiding a car, so it is DISTANCE_NONE ("nan" on the web page) the rest of the time.
+static uint16_t s_distance_mm = DISTANCE_NONE;
 // Stop and guide distances of the LED bar: saved in flash, set by the detector, loaded at start-up
 static RangeLimits s_limits = {CONFIG_INDICATOR_STOP_DISTANCE_MM, CONFIG_INDICATOR_GUIDE_DISTANCE_MM};
 
@@ -229,7 +233,7 @@ static ExchangeResult run_exchange(DetectionLink& link)
 {
     const int64_t start_us = esp_timer_get_time();
     ExchangeResult result = {false, ItemState::Unknown, FailureReason::None, 0};
-    if (!link.started() || link.request_status(s_battery_mv, s_limits) != ESP_OK) {
+    if (!link.started() || link.request_status(s_battery_mv, s_limits, s_distance_mm) != ESP_OK) {
         result.reason = link.started() ? FailureReason::TransportFailure : FailureReason::InitializationFailure;
         return result;
     }
@@ -274,9 +278,13 @@ static void log_result(const ExchangeResult& result)
 static void show_distance(ParkingIndicator& bar, int32_t range_mm)
 {
     if (range_mm == vl53l1x::RANGE_OUT_OF_RANGE) {
+        // Nothing within reach: no car to report a distance for
+        s_distance_mm = DISTANCE_NONE;
         range_mm = s_limits.max_mm;
     } else if (range_mm < 0) {
         return;
+    } else {
+        s_distance_mm = static_cast<uint16_t>(std::min<int32_t>(range_mm, DISTANCE_NONE - 1));
     }
     const GuidanceBar setting = guidance_bar(range_mm, s_limits.min_mm, s_limits.max_mm, LED_COUNT);
     LEDColor color = setting.too_close ? COLOR_STOP : COLOR_APPROACH;
@@ -361,6 +369,7 @@ static ItemState guide_car(DetectionLink& link)
         }
     }
 
+    s_distance_mm = DISTANCE_NONE;  // the lidar goes off, so there is nothing to report
     bar.clear_indicator();
     led_bar.reset();
     float_led_data_pin();
