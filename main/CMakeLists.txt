@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.cpp" "RangeBench.cpp"
+    SRCS "main.cpp" "RangeBench.cpp" "DistanceLimits.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         i2c_bus
